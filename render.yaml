@@ -3,10 +3,13 @@ services:
     name: docscan-bot
     runtime: docker
     plan: free
+    healthCheckPath: /
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: WEBHOOK_URL
+        sync: false
+      - key: WEBHOOK_SECRET
         sync: false
       - key: OCR_PROVIDER
         value: none

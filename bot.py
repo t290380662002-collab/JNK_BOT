@@ -3,12 +3,14 @@ Telegram 證件掃描 Bot（部署於 Render，Docker 運行）
 流程：傳照片 -> 本地 MRZ 辨識 -> Inline 選證件類型 -> 暫存
       -> /export 產生 Excel 發回 -> /list 查看 -> /clear 清空
 """
+import asyncio
 import io
 import logging
 import os
 import uuid
 from datetime import datetime
 
+from aiohttp import web
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -19,6 +21,21 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+# ---------------------------------------------------------------------------
+# Webhook 模式設定（Render Web Service 用）
+#   · 自建 aiohttp 伺服器，同時處理 POST /webhook（收 Telegram 推播）
+#     與 GET /（健康檢查，啟動即回 200，避免 Render 判部署失敗）
+#   · 健康檢查端點最先可用，webhook 設定失敗也不會 crash 整個服務
+#   · 同一隻 Bot 只會有一組 webhook，從根本杜絕 polling 多實例 409
+# ---------------------------------------------------------------------------
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "docscan-2026-secret")
+
+
+def _webhook_base_url() -> str | None:
+    """回傳 webhook 基底網址（不含路徑）；無則回 None（退回 polling）。"""
+    return os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL") or None
 
 import ocr
 import excel_writer
@@ -168,6 +185,75 @@ async def ignore_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("請傳送證件『照片』，或用 /export、/list、/clear 指令。")
 
 
+async def _run_webhook_server(app: Application, base: str):
+    """自建 aiohttp 伺服器：同時處理 Telegram webhook 與健康檢查。
+    啟動順序：HTTP 伺服器 -> PTB 初始化 -> webhook 設定。
+    確保健康檢查端點最先可用，避免 Render 判部署失敗。
+    webhook 設定失敗時只記 log、不 raise，服務持續存活。"""
+    port = int(os.environ.get("PORT", "10000"))
+    url = base.rstrip("/") + WEBHOOK_PATH
+    _ptb_ready = False  # 標記 PTB 是否已初始化完成
+
+    async def handle_webhook(request: web.Request):
+        if WEBHOOK_SECRET and \
+           request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+            return web.Response(status=403, text="forbidden")
+        if not _ptb_ready:
+            return web.Response(status=503, text="not ready")
+        try:
+            data = await request.json()
+        except Exception:
+            return web.Response(status=400, text="bad json")
+        update = Update.de_json(data, app.bot)
+        logger.info("handle_webhook: update_id=%s", update.update_id)
+        try:
+            await app.process_update(update)
+        except Exception:
+            logger.exception("process_update 失敗")
+        return web.Response(text="ok")
+
+    async def handle_health(request: web.Request):
+        return web.Response(text="ok")
+
+    aio_app = web.Application()
+    aio_app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    aio_app.router.add_get("/", handle_health)
+    aio_app.router.add_get("/health", handle_health)
+
+    runner = web.AppRunner(aio_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("HTTP 服務啟動於 0.0.0.0:%s (health=/, webhook=%s)", port, WEBHOOK_PATH)
+
+    # --- HTTP 伺服器已啟動，現在初始化 PTB 並設定 webhook ---
+    try:
+        await app.initialize()
+        await app.start()
+        await app.bot.set_webhook(
+            url=url, secret_token=WEBHOOK_SECRET, drop_pending_updates=True
+        )
+        _ptb_ready = True
+        logger.info("PTB 初始化完成，webhook 已設定：%s", url)
+    except Exception:
+        logger.exception("PTB 初始化或 webhook 設定失敗（服務仍持續存活）")
+
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        try:
+            await app.bot.delete_webhook()
+        except Exception:
+            pass
+        try:
+            await app.stop()
+            await app.shutdown()
+        except Exception:
+            pass
+        await runner.cleanup()
+
+
 def main():
     app = Application.builder().token(TOKEN).build()
 
@@ -180,24 +266,29 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ignore_text))
 
-    webhook_url = os.environ.get("WEBHOOK_URL", "").strip()
-    if webhook_url:
-        port = int(os.environ.get("PORT", "10000"))
-        webhook_path = f"/{TOKEN}"
-        logger.info("以 webhook 模式啟動：%s%s", webhook_url, webhook_path)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            webhook_url=webhook_url.rstrip("/"),
-            webhook_path=webhook_path,
-            drop_pending_updates=True,
-            # Render 冷啟動時 LB 尚未路由，Telegram 驗證 webhook 會暫時 409。
-            # 預設 bootstrap_retries=0 會直接崩潰；調高讓它在 LB 就緒後自動重試成功。
-            bootstrap_retries=120,
+    base = _webhook_base_url()
+    logger.info(
+        "啟動診斷: RENDER_EXTERNAL_URL=%s WEBHOOK_URL=%s PORT=%s",
+        os.environ.get("RENDER_EXTERNAL_URL"),
+        os.environ.get("WEBHOOK_URL"),
+        os.environ.get("PORT"),
+    )
+
+    if base:
+        # ---- Webhook 模式（Render Web Service）----
+        logger.info(
+            "Bot 啟動中 (webhook) -> %s%s | PORT=%s",
+            base.rstrip("/"), WEBHOOK_PATH, os.environ.get("PORT"),
         )
+        try:
+            asyncio.run(_run_webhook_server(app, base))
+        except Exception as e:
+            logger.exception("webhook 服務啟動失敗：%s", e)
+            raise
     else:
-        logger.info("以 polling 模式啟動（本地測試）")
-        app.run_polling()
+        # ---- Polling 模式（本機開發備援）----
+        logger.info("Bot 啟動中 (polling)...")
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
