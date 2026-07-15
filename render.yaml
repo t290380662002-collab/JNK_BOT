@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: docscan-bot
+    runtime: docker
+    plan: free
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+      - key: OCR_PROVIDER
+        value: none
+      - key: GOOGLE_VISION_API_KEY
+        sync: false
+      - key: AZURE_VISION_ENDPOINT
+        sync: false
+      - key: AZURE_VISION_KEY
+        sync: false
