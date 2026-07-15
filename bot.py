@@ -190,6 +190,10 @@ def main():
             port=port,
             webhook_url=webhook_url.rstrip("/"),
             webhook_path=webhook_path,
+            drop_pending_updates=True,
+            # Render 冷啟動時 LB 尚未路由，Telegram 驗證 webhook 會暫時 409。
+            # 預設 bootstrap_retries=0 會直接崩潰；調高讓它在 LB 就緒後自動重試成功。
+            bootstrap_retries=120,
         )
     else:
         logger.info("以 polling 模式啟動（本地測試）")
