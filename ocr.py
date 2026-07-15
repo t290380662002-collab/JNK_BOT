@@ -24,6 +24,25 @@ CLOUD_PROVIDER = os.environ.get("OCR_PROVIDER", "none").lower()
 MRZ_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
 
 
+def _available_cloud() -> list:
+    """回傳當前可用的雲端 OCR 提供者清單。
+    - 'none'/''/'false'：不啟用雲端備援
+    - 'google'/'azure'：指定單一提供者（需對應金鑰）
+    - 'auto'：自動選用「已設定金鑰」的提供者（Google 優先，其次 Azure）
+    這讓使用者只需在 Render 後台貼上任一組金鑰即可啟用，無須切換 provider。
+    """
+    if CLOUD_PROVIDER in ("none", "", "false"):
+        return []
+    if CLOUD_PROVIDER == "auto":
+        out = []
+        if os.environ.get("GOOGLE_VISION_API_KEY"):
+            out.append("google")
+        if os.environ.get("AZURE_VISION_ENDPOINT") and os.environ.get("AZURE_VISION_KEY"):
+            out.append("azure")
+        return out
+    return [CLOUD_PROVIDER]
+
+
 # ---------------------------------------------------------------------------
 # 本地 MRZ 抽取（多策略）
 # ---------------------------------------------------------------------------
@@ -140,8 +159,10 @@ def process_image(image_bytes: bytes) -> dict | None:
                 "raw": "\n".join(lines),
             }
 
-    # 2) 雲端 OCR 備援
-    if CLOUD_PROVIDER in ("google", "azure"):
+    # 2) 雲端 OCR 備援（依 OCR_PROVIDER / 已設定金鑰自動決定）
+    _cloud_providers = _available_cloud()
+    if _cloud_providers:
+        logger.info("啟用雲端 OCR 備援：%s", _cloud_providers)
         cloud_text = _cloud_ocr(image_bytes)
         if cloud_text:
             parsed = _parse_from_free_text(cloud_text)
@@ -149,9 +170,11 @@ def process_image(image_bytes: bytes) -> dict | None:
                 return {
                     "parsed": parsed,
                     "confidence": "medium",
-                    "source": f"cloud_{CLOUD_PROVIDER}",
+                    "source": f"cloud_{_cloud_providers[0]}",
                     "raw": cloud_text,
                 }
+    elif CLOUD_PROVIDER not in ("none", "", "false"):
+        logger.warning("OCR_PROVIDER=%s 但缺少對應金鑰，雲端備援未啟用", CLOUD_PROVIDER)
 
     # 3) 本地全頁文字兜底（無白名單）撈證件號碼
     try:
@@ -171,11 +194,18 @@ def process_image(image_bytes: bytes) -> dict | None:
 # 雲端 OCR 備援
 # ---------------------------------------------------------------------------
 def _cloud_ocr(image_bytes: bytes) -> str:
-    if CLOUD_PROVIDER == "google":
-        return _google_vision(image_bytes)
-    if CLOUD_PROVIDER == "azure":
-        return _azure_ocr(image_bytes)
-    return ""
+    """依可用提供者依序呼叫雲端 OCR，彙整全部回傳文字。"""
+    texts = []
+    for provider in _available_cloud():
+        if provider == "google":
+            t = _google_vision(image_bytes)
+        elif provider == "azure":
+            t = _azure_ocr(image_bytes)
+        else:
+            continue
+        if t:
+            texts.append(t)
+    return "\n".join(texts)
 
 
 def _google_vision(image_bytes: bytes) -> str:

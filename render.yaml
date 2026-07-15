@@ -12,7 +12,7 @@ services:
       - key: WEBHOOK_SECRET
         sync: false
       - key: OCR_PROVIDER
-        value: none
+        value: auto
       - key: GOOGLE_VISION_API_KEY
         sync: false
       - key: AZURE_VISION_ENDPOINT
