@@ -41,6 +41,7 @@ import ocr
 import excel_writer
 import hotel_templates as HT
 import template_filler
+import text_booking
 
 load_dotenv()
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -85,7 +86,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  名匯 / 威尼斯 / 巴黎人 / 倫敦人 / 御園 / 康萊德\n"
         "（自動填英文姓名、證件號碼、出生日期；中文姓名與房型請手動補）\n\n"
         "指令：\n"
-        "  /export  ─ 選酒店並產生訂房單 Excel\n"
+        "  /book    ─ 以文字下訂（貼上入住/退房/飯店/姓名等）\n"
+        "  /export  ─ 選酒店並產生訂房單 Excel（掃描證件後）\n"
         "  /list    ─ 查看已掃描筆數與摘要\n"
         "  /clear   ─ 清空目前暫存\n"
         "  /help    ─ 說明"
@@ -166,18 +168,20 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-def _hotel_keyboard() -> InlineKeyboardMarkup:
-    """六酒店 + 通用格式 的 inline 鍵盤。"""
+def _hotel_keyboard(prefix: str = "hotel") -> InlineKeyboardMarkup:
+    """六酒店（+ 通用格式）的 inline 鍵盤。prefix 區分掃描匯出/文字下訂。"""
     rows = []
     row = []
     for i, key in enumerate(HT.HOTEL_ORDER, 1):
-        row.append(InlineKeyboardButton(HT.HOTELS[key]["name"], callback_data=f"hotel|{key}"))
+        row.append(InlineKeyboardButton(HT.HOTELS[key]["name"], callback_data=f"{prefix}|{key}"))
         if i % 2 == 0:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton("📄 通用格式 (Generic)", callback_data="hotel|generic")])
+    # 通用格式僅掃描匯出適用（文字下訂無 parsed 資料）
+    if prefix == "hotel":
+        rows.append([InlineKeyboardButton("📄 通用格式 (Generic)", callback_data="hotel|generic")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -241,8 +245,133 @@ async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧹 已清空暫存。")
 
 
-async def ignore_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("請傳送證件『照片』，或用 /export、/list、/clear 指令。")
+# ---------------------------------------------------------------------------
+# 文字下訂（/book）：解析文字訂房 -> 填表 -> 發 Excel
+# ---------------------------------------------------------------------------
+BOOKING_KEYWORDS = ["入住", "退房", "飯店", "酒店", "訂房", "房型",
+                    "件數", "房數", "人數", "姓名", "微信", "吸煙", "抽煙"]
+
+
+def _looks_like_booking(text: str) -> bool:
+    return any(k in text for k in BOOKING_KEYWORDS)
+
+
+def _manual_summary(booking: dict, hotel_key: str) -> str:
+    cfg = HT.HOTELS[hotel_key]
+    name = cfg["name"].split(" ")[0]
+    guests = booking.get("guests") or []
+    ci = booking.get("check_in") or "?"
+    co = booking.get("check_out") or "?"
+    rc = booking.get("room_count") or 1
+    smk = booking.get("smoking")
+    lines = [
+        f"✅ 已產生「{name}」訂房單（文字下訂）",
+        f"客人：{('、'.join(guests) if guests else '（未提供姓名）')}（{len(guests) or '?'} 位）",
+        f"入住 {ci} / 退房 {co}｜房數 {rc}",
+        "已填：中文姓名、入住、退房、房數、人數",
+        "未填（請手動補）：英文姓名、證件號碼、出生日期、房型",
+    ]
+    if smk is True:
+        lines.append("🚬 抽煙：已填入清單表吸煙欄" if cfg.get("list_smoking_col")
+                     else "⚠️ 抽煙：本模板無吸煙欄，已記錄但無法填入，請手寫標註")
+    elif smk is False:
+        lines.append("🚭 禁煙：已填入清單表吸煙欄" if cfg.get("list_smoking_col")
+                     else "ℹ️ 禁煙：本模板無吸煙欄")
+    return "\n".join(lines)
+
+
+async def book_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📝 文字下訂\n\n"
+        "直接把訂房資料貼給我，格式例如：\n"
+        "入住：7/21\n退房：7/23\n飯店：倫敦人\n"
+        "房型：維多利亞房大床\n件數：1\n是否吸煙：抽煙\n"
+        "江-泰哥-呂布\n微信：泰哥服務群\n\n"
+        "我會自動解析並產出該酒店訂房單。\n"
+        "英文姓名 / 證件號碼 / 出生日期（無護照時）與房型 留空手動補；"
+        "抽煙僅名匯模板有欄位會自動填，其餘酒店會提醒手寫。"
+    )
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text or ""
+    if not _looks_like_booking(text):
+        await update.message.reply_text(
+            "請傳送證件『照片』，或用 /book 文字下訂、/export、/list、/clear 指令。"
+        )
+        return
+    booking = text_booking.parse(text)
+    await process_manual_booking(update.message.chat_id, context, booking, update)
+
+
+async def process_manual_booking(chat_id, context, booking, update):
+    hotel_key = booking.get("hotel")
+    if not hotel_key:
+        sess = get_session(chat_id)
+        sess["pending_booking"] = booking
+        await context.bot.send_message(
+            chat_id,
+            "未偵測到飯店，請選擇要填入的酒店訂房單：",
+            reply_markup=_hotel_keyboard("bookhotel"),
+        )
+        return
+    await _do_fill_manual(chat_id, context, hotel_key, booking, update)
+
+
+async def _do_fill_manual(chat_id, context, hotel_key, booking, update):
+    cfg = HT.HOTELS.get(hotel_key, {})
+    label = cfg.get("name", hotel_key)
+    msg = update.effective_message if update else None
+    if msg:
+        await msg.reply_text(f"⏳ 正在產生「{label.split(' ')[0]}」訂房單…")
+    try:
+        path = await asyncio.to_thread(template_filler.fill_manual, hotel_key, booking)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zh = label.split(" ")[0]
+        fname = f"{zh}_文字_{ts}.xlsx"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("文字訂房產生失敗")
+        if msg:
+            await msg.reply_text(f"❌ 產生失敗：{e}")
+        return
+    with open(path, "rb") as f:
+        await context.bot.send_document(chat_id=chat_id, document=f, filename=fname)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    await context.bot.send_message(chat_id, _manual_summary(booking, hotel_key))
+
+
+async def bookhotel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, key = q.data.split("|", 1)
+    chat_id = q.message.chat_id
+    sess = get_session(chat_id)
+    booking = sess.pop("pending_booking", None)
+    if not booking:
+        await q.edit_message_text("找不到待處理的訂房資料，請重新傳送。")
+        return
+    cfg = HT.HOTELS.get(key, {})
+    label = cfg.get("name", key)
+    await q.edit_message_text(f"⏳ 正在產生「{label.split(' ')[0]}」訂房單…")
+    try:
+        path = await asyncio.to_thread(template_filler.fill_manual, key, booking)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zh = label.split(" ")[0]
+        fname = f"{zh}_文字_{ts}.xlsx"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("文字訂房產生失敗")
+        await q.edit_message_text(f"❌ 產生失敗：{e}")
+        return
+    with open(path, "rb") as f:
+        await context.bot.send_document(chat_id=chat_id, document=f, filename=fname)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    await context.bot.send_message(chat_id, _manual_summary(booking, key))
 
 
 async def _run_webhook_server(app: Application, base: str):
@@ -319,13 +448,15 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("book", book_cmd))
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CallbackQueryHandler(type_callback, pattern=r"^type\|"))
     app.add_handler(CallbackQueryHandler(hotel_callback, pattern=r"^hotel\|"))
+    app.add_handler(CallbackQueryHandler(bookhotel_callback, pattern=r"^bookhotel\|"))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ignore_text))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     base = _webhook_base_url()
     logger.info(

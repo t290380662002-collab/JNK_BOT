@@ -21,11 +21,16 @@
 """
 
 # 主表格標籤（label-driven）：欄位 -> 可能出現的標籤文字
+# 注意 rooms 用 "No.of Rooms" 而非 "房數"，避免誤匹配 E13「房數 RM ONLY」套餐選項
 FORM_LABELS = {
     "surname": ["姓Surname", "姓 Surname"],
     "firstname": ["名FirstName", "名 First Name"],
     "docnum": ["證件號碼"],
     "dob": ["出生日期DOB", "出生日期 DOB"],
+    "checkin": ["入住日期", "C/I Date"],
+    "checkout": ["退房日期", "C/O Date"],
+    "pax": ["人數", "Pax"],
+    "rooms": ["No.of Rooms", "Rooms("],
 }
 
 HOTELS = {
@@ -37,6 +42,7 @@ HOTELS = {
         "list_header_row": 8,
         "list_start_row": 9,
         "list_cols": {"zh": "G", "en": "H", "doc": "I", "dob": "J", "room": "K"},
+        "list_smoking_col": "L",  # 僅名匯清單表有吸煙欄
     },
     "venetian": {
         "name": "威尼斯 (Venetian)",
@@ -46,6 +52,7 @@ HOTELS = {
         "list_header_row": 2,
         "list_start_row": 3,
         "list_cols": {"zh": "C", "en": "D", "doc": "E", "dob": "F", "room": "G"},
+        "list_smoking_col": None,
     },
     "parisian": {
         "name": "巴黎人 (Parisian)",
@@ -56,6 +63,7 @@ HOTELS = {
         "list_start_row": 2,
         # 注意：巴黎人 出生日期(C) 與 證件號碼(D) 順序與其他酒店相反
         "list_cols": {"zh": "A", "en": "B", "dob": "C", "doc": "D", "room": "E"},
+        "list_smoking_col": None,
     },
     "londoner": {
         "name": "倫敦人 (Londoner)",
@@ -65,6 +73,7 @@ HOTELS = {
         "list_header_row": 2,
         "list_start_row": 3,
         "list_cols": {"zh": "B", "en": "C", "doc": "D", "dob": "E", "room": "F"},
+        "list_smoking_col": None,
     },
     "yuyuan": {
         "name": "御園 (Londoner Court)",
@@ -75,6 +84,7 @@ HOTELS = {
         "list_start_row": 3,  # 第2列空白，資料從第3列起
         # 御園清單表無「房型」欄
         "list_cols": {"zh": "A", "en": "B", "doc": "C", "dob": "D"},
+        "list_smoking_col": None,
     },
     "conrad": {
         "name": "康萊德 (Conrad)",
