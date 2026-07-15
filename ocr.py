@@ -1,8 +1,10 @@
 """
 OCR 混合管線：
   1) 本地 Tesseract 抽取 MRZ 機讀區（免費、離線）
+     —— 多策略：全圖 + 底部機讀區聚焦、放大、自動對比、中值去噪、
+        二值化、多種 psm，大幅提升證件照片的辨識率。
   2) 失敗時呼叫雲端 OCR（Google Vision / Azure）做全頁辨識備援
-  3) 最後用自由文字 regex 兜底抽取欄位
+  3) 最後用本地全頁文字 regex 兜底抽取證件號碼
 由環境變數 OCR_PROVIDER 控制是否啟用雲端備援。
 """
 import os
@@ -12,73 +14,133 @@ import base64
 import logging
 
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageFilter, ImageOps
 
 import mrz_parser
 
 logger = logging.getLogger(__name__)
 
 CLOUD_PROVIDER = os.environ.get("OCR_PROVIDER", "none").lower()
-TESSERACT_CONFIG = "--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
+MRZ_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
 
 
-def _preprocess(img: Image.Image) -> Image.Image:
-    img = img.convert("L")  # 灰階
+# ---------------------------------------------------------------------------
+# 本地 MRZ 抽取（多策略）
+# ---------------------------------------------------------------------------
+def _mean(img: Image.Image) -> float:
+    px = list(img.getdata())
+    return sum(px) / len(px)
+
+
+def _prep_mrz(img: Image.Image, upscale_to: int) -> Image.Image:
+    """灰階 → 自動對比 → 中值去噪 → 二值化(確保黑字白底) → 必要時放大。
+    MRZ 是機器印刷、對比最高的文字，經此處理後 Tesseract 辨識率明顯提升。"""
+    img = img.convert("L")
     w, h = img.size
-    if max(w, h) < 1100:  # 太小就放大，提升 OCR 準確度
-        scale = 1100 / max(w, h)
-        img = img.resize((int(w * scale), int(h * scale)))
-    return img
+    s = upscale_to / max(w, h)
+    if s > 1:
+        img = img.resize((int(w * s), int(h * s)), Image.LANCZOS)
+    img = ImageOps.autocontrast(img)
+    img = img.filter(ImageFilter.MedianFilter(3))
+    # 二值化：固定閾值；若整體偏暗（白字黑底）則反相成黑字白底
+    bw = img.point(lambda p: 255 if p > 140 else 0)
+    if _mean(bw) < 128:
+        bw = ImageOps.invert(bw)
+    return bw
 
 
-def _extract_mrz_lines(text: str):
-    """從 OCR 文字中挑出 MRZ 候選行：含 '<' 且長度 >= 25。"""
+def _bottom_crop(img: Image.Image, frac: float = 0.5) -> Image.Image:
+    """裁切底部 frac 比例——MRZ 固定位於證件底部。"""
+    w, h = img.size
+    return img.crop((0, int(h * (1 - frac)), w, h))
+
+
+def _ocr_pass(img: Image.Image, upscale_to: int, psm: int,
+              whitelist: str = MRZ_WHITELIST) -> list:
+    pre = _prep_mrz(img, upscale_to)
+    cfg = f"--psm {psm} -c tessedit_char_whitelist={whitelist}"
+    try:
+        txt = pytesseract.image_to_string(pre, config=cfg)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("OCR pass 失敗(psm=%s): %s", psm, e)
+        return []
+    return [l for l in txt.splitlines() if l.strip()]
+
+
+def _collect_candidates(image_bytes: bytes) -> list:
+    """對同一張圖跑多種 OCR 策略，彙整 MRZ 候選行（去重）。"""
+    img = Image.open(io.BytesIO(image_bytes))
+    raw = []
+    # 全圖 + 底部機讀區聚焦；多種 psm 組合
+    for variant in (img, _bottom_crop(img, 0.5)):
+        for up, psm in ((1400, 6), (1600, 6), (1700, 11), (1500, 7)):
+            raw += _ocr_pass(variant, up, psm)
+    # 過濾成 MRZ 候選：含 '<' 且長度 >= 18
+    lines = []
+    for l in raw:
+        c = mrz_parser._clean(l)
+        if "<" in c and len(c) >= 18:
+            lines.append(c)
+    # 去重保序
+    seen, out = set(), []
+    for l in lines:
+        if l not in seen:
+            seen.add(l)
+            out.append(l)
+    return out
+
+
+def _extract_mrz_lines(text: str) -> list:
+    """從 OCR 文字中挑出 MRZ 候選行：含 '<' 且長度 >= 18。"""
     lines = []
     for raw in text.splitlines():
         cleaned = mrz_parser._clean(raw)
-        if "<" in cleaned and len(cleaned) >= 25:
+        if "<" in cleaned and len(cleaned) >= 18:
             lines.append(cleaned)
     return lines
 
 
-def _parse_from_free_text(text: str):
-    """雲端 OCR 全頁文字的兜底解析：先找 MRZ 行，再嘗試 regex。"""
+def _parse_from_free_text(text: str) -> dict | None:
+    """全頁文字的兜底解析：先找 MRZ 行，再嘗試 regex 撈證件號碼。"""
     lines = _extract_mrz_lines(text)
     if len(lines) >= 2:
         parsed = mrz_parser.parse(lines)
         if parsed:
             return parsed
-    # 找不到標準 MRZ，嘗試從自由文字撈證件號碼
-    m = re.search(r"(?:PASSPORT|護照|NO\.?|號碼)[\s:]*([A-Z]{1,3}[0-9]{6,9})", text, re.I)
+    m = re.search(
+        r"(?:PASSPORT|護照|NO\.?|號碼|DOC(?:UMENT)?\s*NO)[\s:]*([A-Z]{1,3}[0-9]{6,9})",
+        text, re.I,
+    )
     if m:
         return {"doc_number": m.group(1), "doc_type_guess": "護照"}
     return None
 
 
-def process_image(image_bytes: bytes) -> dict:
+def process_image(image_bytes: bytes) -> dict | None:
     """
     回傳 dict：
       { "parsed": {...}, "confidence": str, "source": str, "raw": str }
     或 None（完全無法辨識）。
     """
-    img = Image.open(io.BytesIO(image_bytes))
-    img = _preprocess(img)
+    # 1) 本地 MRZ 多策略抽取
+    try:
+        lines = _collect_candidates(image_bytes)
+    except Exception:  # noqa: BLE001
+        logger.exception("本地 OCR 處理例外")
+        lines = []
+    logger.info("本地 MRZ 候選行數：%d", len(lines))
 
-    text = pytesseract.image_to_string(img, config=TESSERACT_CONFIG)
-    mrz_lines = _extract_mrz_lines(text)
-    logger.info("本地 MRZ 候選行數：%d", len(mrz_lines))
-
-    if len(mrz_lines) >= 2:
-        parsed = mrz_parser.parse(mrz_lines)
+    if len(lines) >= 2:
+        parsed = mrz_parser.parse(lines)
         if parsed:
             return {
                 "parsed": parsed,
                 "confidence": "high",
                 "source": "local_mrz",
-                "raw": text,
+                "raw": "\n".join(lines),
             }
 
-    # 本地 MRZ 失敗 -> 雲端 OCR 備援
+    # 2) 雲端 OCR 備援
     if CLOUD_PROVIDER in ("google", "azure"):
         cloud_text = _cloud_ocr(image_bytes)
         if cloud_text:
@@ -91,10 +153,16 @@ def process_image(image_bytes: bytes) -> dict:
                     "raw": cloud_text,
                 }
 
-    # 最後兜底：用本地文字直接試一次自由文字解析
-    parsed = _parse_from_free_text(text)
+    # 3) 本地全頁文字兜底（無白名單）撈證件號碼
+    try:
+        full = pytesseract.image_to_string(
+            Image.open(io.BytesIO(image_bytes)).convert("L"), config="--psm 6"
+        )
+    except Exception:  # noqa: BLE001
+        full = ""
+    parsed = _parse_from_free_text(full)
     if parsed:
-        return {"parsed": parsed, "confidence": "low", "source": "local_text", "raw": text}
+        return {"parsed": parsed, "confidence": "low", "source": "local_text", "raw": full}
 
     return None
 

@@ -138,8 +138,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not result or not result.get("parsed"):
         await update.message.reply_text(
-            "⚠️ 未偵測到 MRZ 機讀區，雲端 OCR 也無法解析。\n"
-            "請重拍（光線充足、證件攤平、底部機讀碼清晰）或改用手動輸入。"
+            "⚠️ 無法從這張照片辨識出機讀碼（MRZ）。\n"
+            "請重拍：光線充足、證件攤平、底部機讀碼清晰對焦；\n"
+            "或改用 /book 直接輸入資料。"
         )
         return
 
