@@ -39,6 +39,8 @@ def _webhook_base_url() -> str | None:
 
 import ocr
 import excel_writer
+import hotel_templates as HT
+import template_filler
 
 load_dotenv()
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -78,9 +80,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📸 證件掃描 Bot\n\n"
         "直接傳送「護照 / 港澳通行證 / 回鄉證 / 台胞證」照片，"
-        "我會自動辨識機讀區並填入 Excel。\n\n"
+        "我會自動辨識機讀區並填入訂房單。\n\n"
+        "支援酒店訂房單：\n"
+        "  名匯 / 威尼斯 / 巴黎人 / 倫敦人 / 御園 / 康萊德\n"
+        "（自動填英文姓名、證件號碼、出生日期；中文姓名與房型請手動補）\n\n"
         "指令：\n"
-        "  /export  ─ 產生並發送 Excel\n"
+        "  /export  ─ 選酒店並產生訂房單 Excel\n"
         "  /list    ─ 查看已掃描筆數與摘要\n"
         "  /clear   ─ 清空目前暫存\n"
         "  /help    ─ 說明"
@@ -161,17 +166,72 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+def _hotel_keyboard() -> InlineKeyboardMarkup:
+    """六酒店 + 通用格式 的 inline 鍵盤。"""
+    rows = []
+    row = []
+    for i, key in enumerate(HT.HOTEL_ORDER, 1):
+        row.append(InlineKeyboardButton(HT.HOTELS[key]["name"], callback_data=f"hotel|{key}"))
+        if i % 2 == 0:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("📄 通用格式 (Generic)", callback_data="hotel|generic")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess = get_session(update.message.chat_id)
     if not sess["records"]:
         await update.message.reply_text("尚無資料，先傳照片吧。")
         return
-    path = excel_writer.build(sess["records"])
+    await update.message.reply_text(
+        f"目前共 {len(sess['records'])} 筆。請選擇要匯出的酒店訂房單格式：",
+        reply_markup=_hotel_keyboard(),
+    )
+
+
+async def hotel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, key = q.data.split("|", 1)
+    chat_id = q.message.chat_id
+    sess = get_session(chat_id)
+    if not sess["records"]:
+        await q.edit_message_text("尚無資料，先傳照片吧。")
+        return
+
+    label = "通用格式" if key == "generic" else HT.HOTELS.get(key, {}).get("name", key)
+    await q.edit_message_text(f"⏳ 正在產生「{label}」訂房單…")
+
+    try:
+        if key == "generic":
+            path = await asyncio.to_thread(excel_writer.build, sess["records"])
+            fname = os.path.basename(path)
+        else:
+            path = await asyncio.to_thread(template_filler.fill, key, sess["records"])
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            zh = HT.HOTELS[key]["name"].split(" ")[0]
+            fname = f"{zh}_{ts}.xlsx"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("匯出失敗")
+        await context.bot.send_message(chat_id, f"❌ 產生失敗：{e}")
+        return
+
     with open(path, "rb") as f:
-        await update.message.reply_document(
-            document=f, filename=os.path.basename(path)
-        )
-    os.remove(path)
+        await context.bot.send_document(chat_id=chat_id, document=f, filename=fname)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+    n = len(sess["records"])
+    note = "（中文姓名、房型請自行手動補上）" if key != "generic" else ""
+    await context.bot.send_message(
+        chat_id,
+        f"✅ 已匯出「{label}」，共 {n} 位客人{note}",
+    )
 
 
 async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -263,6 +323,7 @@ def main():
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CallbackQueryHandler(type_callback, pattern=r"^type\|"))
+    app.add_handler(CallbackQueryHandler(hotel_callback, pattern=r"^hotel\|"))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ignore_text))
 

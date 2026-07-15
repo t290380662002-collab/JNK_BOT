@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 vendor/
 .venv/
+sample_output/
+analyze_forms.py
+inspect_templates.py
+poll_deploy.py
