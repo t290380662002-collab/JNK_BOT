@@ -431,24 +431,25 @@ async def bookhotel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def _run_webhook_server(app: Application, base: str):
     """自建 aiohttp 伺服器：同時處理 Telegram webhook 與健康檢查。
-    啟動順序：HTTP 伺服器 -> PTB 初始化 -> 標記 ready -> 設定 webhook（重試）。
-    關鍵設計：
-      · 健康檢查端點最先可用，避免 Render 判部署失敗。
-      · _ptb_ready 在 app.start() 成功後即設為 True，與 set_webhook 是否成功脫鉤，
-        避免「set_webhook 偶發失敗 -> 永久 503」的脆點。
-      · set_webhook 失敗會重試（最多 10 次），因為 webhook 一旦設好就持久，
-        Telegram 會持續推播；冷啟動的瞬斷不該讓 bot 永久失靈。
-      · 絕不在 finally 刪除 webhook：容器重啟/部署時舊容器關閉若刪除，
-        會造成「容器活著但 Telegram 沒 webhook」的死狀態。"""
+    自癒 + 可診斷設計：
+      · HTTP 伺服器先啟動（GET / 即回 200，Render 不判部署失敗）。
+      · PTB 初始化/啟動搬進背景 ensure_ready 任務，不阻塞 HTTP。
+      · ensure_ready 重試 app.initialize()/app.start()（40s 超時防卡死）
+        與 set_webhook，並每 30 秒 getWebhookInfo 自檢：webhook 網址不符就補設——
+        徹底免疫「舊容器關閉刪 webhook」「冷啟動 set_webhook 偶敗」「start 卡死」。
+      · GET / 與 /health 回傳就緒狀態與最後錯誤，便於遠端診斷。
+      · 絕不在 finally 刪除 webhook。"""
     port = int(os.environ.get("PORT", "10000"))
     url = base.rstrip("/") + WEBHOOK_PATH
-    _ptb_ready = False  # 標記 PTB 是否已初始化完成
+
+    # 跨閉包共享的就緒狀態（dict 讓 handler 與背景任務讀寫同一物件）
+    diag = {"ready": False, "error": None, "webhook_url": None}
 
     async def handle_webhook(request: web.Request):
         if WEBHOOK_SECRET and \
            request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
             return web.Response(status=403, text="forbidden")
-        if not _ptb_ready:
+        if not diag["ready"]:
             return web.Response(status=503, text="not ready")
         try:
             data = await request.json()
@@ -463,7 +464,12 @@ async def _run_webhook_server(app: Application, base: str):
         return web.Response(text="ok")
 
     async def handle_health(request: web.Request):
-        return web.Response(text="ok")
+        return web.json_response({
+            "status": "ok",
+            "ready": diag["ready"],
+            "webhook_url": diag["webhook_url"],
+            "error": str(diag["error"]) if diag["error"] else None,
+        })
 
     aio_app = web.Application()
     aio_app.router.add_post(WEBHOOK_PATH, handle_webhook)
@@ -476,36 +482,48 @@ async def _run_webhook_server(app: Application, base: str):
     await site.start()
     logger.info("HTTP 服務啟動於 0.0.0.0:%s (health=/, webhook=%s)", port, WEBHOOK_PATH)
 
-    # --- HTTP 伺服器已啟動，初始化 PTB ---
-    try:
-        await app.initialize()
-        await app.start()
-        _ptb_ready = True  # 先標記 ready，handler 隨時可處理（只要 Telegram 有 webhook）
-        logger.info("PTB 初始化完成，handlers 已就緒")
-
-        # --- 設定 webhook（重試，絕不刪除）---
-        last_err = None
-        for attempt in range(1, 11):
+    async def ensure_ready():
+        """背景自癒任務：確保 PTB 啟動 + webhook 設定好；失敗重試；定時自檢補設。"""
+        initialized = False
+        started = False
+        while True:
             try:
-                await app.bot.set_webhook(
-                    url=url,
-                    secret_token=WEBHOOK_SECRET,
-                    drop_pending_updates=True,
-                    max_connections=50,
-                )
-                logger.info("webhook 已設定（第 %d 次）：%s", attempt, url)
-                break
+                if not initialized:
+                    await app.initialize()
+                    initialized = True
+                    logger.info("PTB initialize 完成")
+                if not started:
+                    try:
+                        await asyncio.wait_for(app.start(), timeout=40)
+                    except asyncio.TimeoutError:
+                        logger.warning("app.start() 超時（40s），將重試")
+                        raise
+                    started = True
+                    diag["ready"] = True
+                    diag["error"] = None
+                    logger.info("PTB start 完成，handlers 已就緒")
+                # webhook 自檢 + 補設
+                try:
+                    info = await app.bot.get_webhook_info()
+                    diag["webhook_url"] = info.url or None
+                    if info.url != url:
+                        logger.warning("webhook 未註冊或網址不符（%s），重新設定", info.url)
+                        await app.bot.set_webhook(
+                            url=url, secret_token=WEBHOOK_SECRET,
+                            drop_pending_updates=True, max_connections=50,
+                        )
+                        diag["webhook_url"] = url
+                        logger.info("webhook 已設定：%s", url)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("webhook 自檢/設定失敗：%s", e)
             except Exception as e:  # noqa: BLE001
-                last_err = e
-                logger.warning("set_webhook 第 %d 次失敗：%s", attempt, e)
-                await asyncio.sleep(3)
-        else:
-            logger.error(
-                "set_webhook 最終失敗：%s —— handler 已就緒，可改由外部 setWebhook 補救",
-                last_err,
-            )
-    except Exception:
-        logger.exception("PTB 初始化/啟動失敗（handler 未就緒）")
+                diag["error"] = e
+                diag["ready"] = False
+                logger.exception("PTB 啟動失敗，將於 30 秒後重試：%s", e)
+            await asyncio.sleep(30)
+
+    # 背景啟動自癒任務（不阻塞 HTTP 伺服器；start() 暫時失敗時 GET / 仍可看到狀態）
+    _ready_task = asyncio.create_task(ensure_ready())
 
     try:
         while True:
