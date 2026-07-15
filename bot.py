@@ -431,9 +431,15 @@ async def bookhotel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def _run_webhook_server(app: Application, base: str):
     """自建 aiohttp 伺服器：同時處理 Telegram webhook 與健康檢查。
-    啟動順序：HTTP 伺服器 -> PTB 初始化 -> webhook 設定。
-    確保健康檢查端點最先可用，避免 Render 判部署失敗。
-    webhook 設定失敗時只記 log、不 raise，服務持續存活。"""
+    啟動順序：HTTP 伺服器 -> PTB 初始化 -> 標記 ready -> 設定 webhook（重試）。
+    關鍵設計：
+      · 健康檢查端點最先可用，避免 Render 判部署失敗。
+      · _ptb_ready 在 app.start() 成功後即設為 True，與 set_webhook 是否成功脫鉤，
+        避免「set_webhook 偶發失敗 -> 永久 503」的脆點。
+      · set_webhook 失敗會重試（最多 10 次），因為 webhook 一旦設好就持久，
+        Telegram 會持續推播；冷啟動的瞬斷不該讓 bot 永久失靈。
+      · 絕不在 finally 刪除 webhook：容器重啟/部署時舊容器關閉若刪除，
+        會造成「容器活著但 Telegram 沒 webhook」的死狀態。"""
     port = int(os.environ.get("PORT", "10000"))
     url = base.rstrip("/") + WEBHOOK_PATH
     _ptb_ready = False  # 標記 PTB 是否已初始化完成
@@ -470,26 +476,42 @@ async def _run_webhook_server(app: Application, base: str):
     await site.start()
     logger.info("HTTP 服務啟動於 0.0.0.0:%s (health=/, webhook=%s)", port, WEBHOOK_PATH)
 
-    # --- HTTP 伺服器已啟動，現在初始化 PTB 並設定 webhook ---
+    # --- HTTP 伺服器已啟動，初始化 PTB ---
     try:
         await app.initialize()
         await app.start()
-        await app.bot.set_webhook(
-            url=url, secret_token=WEBHOOK_SECRET, drop_pending_updates=True
-        )
-        _ptb_ready = True
-        logger.info("PTB 初始化完成，webhook 已設定：%s", url)
+        _ptb_ready = True  # 先標記 ready，handler 隨時可處理（只要 Telegram 有 webhook）
+        logger.info("PTB 初始化完成，handlers 已就緒")
+
+        # --- 設定 webhook（重試，絕不刪除）---
+        last_err = None
+        for attempt in range(1, 11):
+            try:
+                await app.bot.set_webhook(
+                    url=url,
+                    secret_token=WEBHOOK_SECRET,
+                    drop_pending_updates=True,
+                    max_connections=50,
+                )
+                logger.info("webhook 已設定（第 %d 次）：%s", attempt, url)
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                logger.warning("set_webhook 第 %d 次失敗：%s", attempt, e)
+                await asyncio.sleep(3)
+        else:
+            logger.error(
+                "set_webhook 最終失敗：%s —— handler 已就緒，可改由外部 setWebhook 補救",
+                last_err,
+            )
     except Exception:
-        logger.exception("PTB 初始化或 webhook 設定失敗（服務仍持續存活）")
+        logger.exception("PTB 初始化/啟動失敗（handler 未就緒）")
 
     try:
         while True:
             await asyncio.sleep(3600)
     finally:
-        try:
-            await app.bot.delete_webhook()
-        except Exception:
-            pass
+        # 注意：刻意不呼叫 delete_webhook()，讓 webhook 在容器重啟間持久存在
         try:
             await app.stop()
             await app.shutdown()
