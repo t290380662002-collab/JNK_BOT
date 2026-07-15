@@ -78,6 +78,15 @@ def _split_name(zh: str):
     return zh[0], zh[1:]
 
 
+def _split_en_name(en: str):
+    """英文姓名拆 姓/名：'WU，JUN' -> ('WU','JUN')；'STEPHENS,JOHN A' -> ('STEPHENS','JOHN A')。"""
+    en = (en or "").replace("，", ",").replace("、", ",").strip()
+    parts = [p.strip() for p in re.split(r"[,/\s]+", en) if p.strip()]
+    if not parts:
+        return "", ""
+    return parts[0], (" ".join(parts[1:]) if len(parts) > 1 else "")
+
+
 # ---------------------------------------------------------------------------
 # 標準化：record / booking -> 內部 booking dict
 # ---------------------------------------------------------------------------
@@ -95,14 +104,17 @@ def _normalize_record(rec: dict) -> dict:
         # 掃描無中文姓名/房型 -> 留空手動補
     manual = rec.get("manual") or rec.get("booking")
     if manual:
+        en = (manual.get("en_name") or "").strip()
         zh = (manual.get("zh_name") or "").strip()
+        if en:
+            b["en"] = en.upper()
+            s, f = _split_en_name(en)
+            b["surname"], b["firstname"] = s.upper(), f.upper()
         if zh:
             b["zh"] = zh
-            s, f = _split_name(zh)
-            b["surname"], b["firstname"] = s, f
-        en = manual.get("en_name")
-        if en:
-            b["en"] = en.strip()
+            if not en:                      # 無英文時才用中文拆 姓/名
+                s, f = _split_name(zh)
+                b["surname"], b["firstname"] = s, f
         if manual.get("doc_number"):
             b["docnum"] = str(manual["doc_number"]).strip().upper()
         if manual.get("dob"):
@@ -122,18 +134,20 @@ def _normalize_record(rec: dict) -> dict:
 
 
 def _bookings_from_manual(booking: dict) -> list:
-    """文字訂房 dict -> 標準化 booking 清單（每位客人一筆，共用日期/房數/吸煙）。"""
+    """文字訂房 dict -> 標準化 booking 清單（每位客人一筆，共用日期/房數/吸煙）。
+
+    booking["guests"] 為 dict 清單，每筆含 zh_name/en_name/doc_number/dob（部分可空）。
+    """
     guests = booking.get("guests") or []
-    en_names = booking.get("en_names") or []
-    doc_numbers = booking.get("doc_numbers") or []
-    dobs = booking.get("dobs") or []
     out = []
-    for i, g in enumerate(guests):
+    for g in guests:
+        if isinstance(g, str):
+            g = {"zh_name": g}
         m = {
-            "zh_name": g,
-            "en_name": en_names[i] if i < len(en_names) else None,
-            "doc_number": doc_numbers[i] if i < len(doc_numbers) else None,
-            "dob": dobs[i] if i < len(dobs) else None,
+            "zh_name": g.get("zh_name"),
+            "en_name": g.get("en_name"),
+            "doc_number": g.get("doc_number"),
+            "dob": g.get("dob"),
             "check_in": booking.get("check_in"),
             "check_out": booking.get("check_out"),
             "room_count": booking.get("room_count"),

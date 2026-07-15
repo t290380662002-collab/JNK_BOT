@@ -77,6 +77,27 @@ def fmt_result(r: dict) -> str:
     return "\n".join(lines)
 
 
+def format_passport_text(r: dict) -> str:
+    """把掃描結果轉成「讀取證件完畢 回傳文字」格式，可直接貼進 /book 訊息。"""
+    p = r.get("parsed", {})
+    zh = p.get("zh_name") or "（未提供）"
+    last = (p.get("last_name") or "").strip().upper()
+    first = (p.get("first_name") or "").strip().upper()
+    if last and first:
+        en = f"{last}，{first}"
+    else:
+        en = last or "（未提供）"
+    dob = p.get("date_of_birth") or "（未提供）"
+    doc = p.get("doc_number") or "（未提供）"
+    return (
+        "讀取證件完畢，回傳文字：\n"
+        f"入住者中文：{zh}\n"
+        f"入住者英文：{en}\n"
+        f"出生年月日：{dob}\n"
+        f"證件號碼：{doc}"
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📸 證件掃描 Bot\n\n"
@@ -130,7 +151,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [[InlineKeyboardButton(t, callback_data=f"type|{key}|{t}") for t in DOC_TYPES]]
     )
     await update.message.reply_text(
-        fmt_result(result) + "\n\n請選擇證件類型：", reply_markup=kb
+        fmt_result(result)
+        + "\n\n"
+        + format_passport_text(result)
+        + "\n\n請選擇證件類型：",
+        reply_markup=kb,
     )
 
 
@@ -260,23 +285,53 @@ def _manual_summary(booking: dict, hotel_key: str) -> str:
     cfg = HT.HOTELS[hotel_key]
     name = cfg["name"].split(" ")[0]
     guests = booking.get("guests") or []
+    g0 = guests[0] if guests else {}
+
+    def _gname(g):
+        return g.get("zh_name") or g.get("en_name") or "（未提供姓名）"
+
+    names = "、".join(_gname(g) for g in guests) if guests else "（未提供姓名）"
     ci = booking.get("check_in") or "?"
     co = booking.get("check_out") or "?"
     rc = booking.get("room_count") or 1
-    smk = booking.get("smoking")
+    pax = booking.get("pax") or len(guests) or 1
+
     lines = [
         f"✅ 已產生「{name}」訂房單（文字下訂）",
-        f"客人：{('、'.join(guests) if guests else '（未提供姓名）')}（{len(guests) or '?'} 位）",
-        f"入住 {ci} / 退房 {co}｜房數 {rc}",
-        "已填：中文姓名、入住、退房、房數、人數",
-        "未填（請手動補）：英文姓名、證件號碼、出生日期、房型",
+        f"客人：{names}（{len(guests) or '?'} 位）",
+        f"入住 {ci} / 退房 {co}｜房數 {rc}｜人數 {pax}",
     ]
+
+    # 依實際有無護照資料，動態列出已填 / 未填
+    filled = ["中文姓名", "入住", "退房", "房數", "人數"]
+    unfilled = []
+    if g0.get("en_name"):
+        filled.append("英文姓名")
+    else:
+        unfilled.append("英文姓名")
+    if g0.get("doc_number"):
+        filled.append("證件號碼")
+    else:
+        unfilled.append("證件號碼")
+    if g0.get("dob"):
+        filled.append("出生日期")
+    else:
+        unfilled.append("出生日期")
+    unfilled.append("房型（依指示不填）")
+
+    lines.append("已填：" + "、".join(filled))
+    lines.append("未填（手動補）：" + "、".join(unfilled))
+
+    smk = booking.get("smoking")
     if smk is True:
         lines.append("🚬 抽煙：已填入清單表吸煙欄" if cfg.get("list_smoking_col")
                      else "⚠️ 抽煙：本模板無吸煙欄，已記錄但無法填入，請手寫標註")
     elif smk is False:
         lines.append("🚭 禁煙：已填入清單表吸煙欄" if cfg.get("list_smoking_col")
                      else "ℹ️ 禁煙：本模板無吸煙欄")
+
+    if booking.get("booker"):
+        lines.append(f"📇 訂房人：{booking['booker']}（本表無訂房人欄，僅作記錄）")
     return "\n".join(lines)
 
 
