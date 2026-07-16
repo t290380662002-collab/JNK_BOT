@@ -257,6 +257,13 @@ def process_image(image_bytes: bytes) -> dict | None:
     # 3) 本地全頁文字兜底（eng+chi_tra 多語言）撈證件號碼 / 中文欄位
     try:
         img_full = Image.open(io.BytesIO(image_bytes)).convert("L")
+        # 放大 + 銳化：真實證件照的中文姓名是小字，放大後 Tesseract 辨識率明顯提升
+        # （數字那一步有放大所以讀得到，中文這一步原本沒放大，故補上）。
+        w, h = img_full.size
+        scale = max(1.0, 1800 / max(w, h))
+        if scale > 1:
+            img_full = img_full.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        img_full = img_full.filter(ImageFilter.SHARPEN)
         full = pytesseract.image_to_string(img_full, lang=OCR_LANG, config="--psm 6")
         # 額外針對「上半部（中文姓名常出現區域）」做一次繁中聚焦 OCR，
         # 提升中文姓名擷取率（護照正面照片姓名多在照片右側/上半）。
