@@ -90,6 +90,9 @@ def format_passport_text(r: dict) -> str:
     first = (p.get("first_name") or "").strip().upper()
     if last and first:
         en = f"{last}，{first}"
+    elif p.get("en_name"):
+        # 退路：en_name 為 "CHUNG,MING-HUNG" 形式，轉成「姓，名」顯示
+        en = p["en_name"].replace(",", "，")
     else:
         en = last or "（未提供）"
     dob = p.get("date_of_birth") or "（未提供）"

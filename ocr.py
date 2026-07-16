@@ -183,17 +183,36 @@ def _extract_chinese_fields(text: str) -> dict | None:
     if nm:
         res["zh_name"] = nm.group(1)
 
-    # 英文姓名：標籤後通常為「姓, 名-名」形態，且常與中文姓名同一區塊。
+    # 英文姓名：護照可見英文常為「姓, 名-名」（, 或全形逗號，且常因 OCR 斷行
+    # 把姓、名拆成兩行，如 'CHUNG，\nMING-HUNG'）。MRZ 第一行則為「姓<<名」。
     # 1) 優先從「中文姓名之後」的文字找（避開標籤括號內的 Surame, Giver 誤判）
-    # 2) 支援連字號（MING-HUNG）、中文逗號（，）、跨行（\s 含換行）
+    # 2) 支援全形逗號（，）、連字號（MING-HUNG）、跨行（\s 含換行）
+    # 3) 退路：純空白分隔的「姓 名」（名需含連字號或為多段，降低欄位標籤誤判）
+    # 抽出後同時寫入 last_name/first_name（與 MRZ 解析器一致，供 Excel/回傳文字使用）。
+    _EN_LABEL_BLACKLIST = {
+        "NAME", "SURNAME", "GIVEN", "BIRTH", "DATE", "SEX", "NATIONAL",
+        "NATIONALITY", "PASSPORT", "DOCUMENT", "AUTHORITY", "REPUBLIC",
+        "CHINA", "CHINESE", "SIGNATURE", "TYPE", "ISSUE", "EXPIRY",
+        "OF", "THE", "TAIWAN", "TAIPEI", "REPUBLICOFCHINA",
+    }
     en = None
     if nm:
         after = text[nm.end():]
+        # 先找「姓, 名 / 姓，名」（含全形逗號、可跨行）
         en = re.search(r"\b([A-Z]{2,})[,，]\s*([A-Z]+(?:[ -][A-Z]+)*)", after)
+        # 退路：姓 名（空白分隔，名需含連字號或為多段）
+        if not en:
+            en = re.search(r"\b([A-Z]{2,})\s+([A-Z]+(?:[ -][A-Z]+){1,3})", after)
     if not en:
         en = re.search(r"\b([A-Z]{2,})[,，]\s*([A-Z]+(?:[ -][A-Z]+)*)", text)
     if en:
-        res["en_name"] = f"{en.group(1)},{en.group(2).strip()}"
+        last = en.group(1).strip().upper()
+        first = en.group(2).strip().upper()
+        # 排除欄位標籤誤判（如 NAME SURNAME / DATE OF BIRTH）
+        if last not in _EN_LABEL_BLACKLIST and not re.search(r"[<0-9]", first):
+            res["en_name"] = f"{last},{first}"
+            res["last_name"] = last
+            res["first_name"] = first
 
     # 出生日期：出生/出生日期/Birth + 1981.07.08 / 1981年07月08日 / 1981-07-08
     dm = re.search(
@@ -247,22 +266,27 @@ def process_image(image_bytes: bytes) -> dict | None:
         if cloud_text:
             cf = _extract_chinese_fields(cloud_text)   # 中英文姓名 + 證件號（OCR 文字）
             parsed = _parse_from_free_text(cloud_text)  # 含單行 MRZ 第二行解析（doc/dob/sex/nat/exp）
-            # 合併：MRZ 欄位最可靠（證件號/生日），中文姓名以 OCR 文字為主
+            # 合併：MRZ 欄位最可靠（證件號/生日/英文姓名），中文姓名以 OCR 文字為主
             merged: dict = {}
             if cf:
                 merged.update(cf)
             if parsed:
                 for k in ("doc_number", "date_of_birth", "sex",
-                          "nationality", "expiry_date", "issuer", "doc_type_guess"):
+                          "nationality", "expiry_date", "issuer",
+                          "doc_type_guess", "last_name", "first_name"):
                     if parsed.get(k):
                         merged[k] = parsed[k]
+            # 若 MRZ 沒給英文姓名（單行 MRZ 缺第一行），但 cf 抽到 en_name，則補上
+            if not merged.get("en_name") and merged.get("last_name"):
+                merged["en_name"] = f"{merged['last_name']},{merged.get('first_name','')}"
             if merged:
                 return {
                     "parsed": merged,
                     "confidence": "medium",
                     "source": f"cloud_{_cloud_providers[0]}_text",
                     "raw": cloud_text,
-                    "no_mrz": True,
+                    # 只有「真的沒偵測到 MRZ」才標註，避免誤導使用者
+                    "no_mrz": parsed is None,
                 }
     elif CLOUD_PROVIDER not in ("none", "", "false"):
         logger.warning("OCR_PROVIDER=%s 但缺少對應金鑰，雲端備援未啟用", CLOUD_PROVIDER)
