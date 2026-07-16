@@ -22,7 +22,7 @@ booking（文字訂房）結構：
   · 有清單表的酒店：清單表填全部客人（掃描時中文姓名留空手動補；文字訂房則填入中文姓名）
   · 每位客人各產生一張訂房單主表格（label-driven 填入）
   · 房型：依用戶指示「無須填入」，均留空手動補
-  · 吸煙：True/False 會填入訂房單主表格「特別要求 Special request」欄（抽煙/禁煙）
+  · 吸菸：True/False 會填入訂房單主表格「特別要求 Special request」欄（吸菸/禁煙）
 """
 import os
 import re
@@ -214,10 +214,10 @@ _CHECK_FMT = "yyyy/mm/dd"    # 入住/退房日期：用戶確認為 2026/07/29 
 
 def _fill_form_sheet(ws, b: dict):
     """label-driven 填一張訂房單主表格（只填有值的欄，避免清掉模板）。"""
-    # 吸煙 -> 特別要求欄；True=抽煙，False=禁煙，None=不填
+    # 吸菸 -> 特別要求欄；True=吸菸，False=禁煙，None=不填
     special = ""
     if b.get("smoking") is True:
-        special = "抽煙"
+        special = "吸菸"
     elif b.get("smoking") is False:
         special = "禁煙"
     values = {
@@ -302,7 +302,7 @@ def _fill_list_sheet(ws, cfg: dict, bookings: list):
             if b.get("smoking") is None:
                 continue
             ws.cell(row=start + i, column=sidx,
-                    value="抽煙" if b["smoking"] else "禁煙")
+                    value="吸菸" if b["smoking"] else "禁煙")
 
 
 # ---------------------------------------------------------------------------

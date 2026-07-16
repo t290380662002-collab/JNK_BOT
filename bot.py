@@ -154,7 +154,7 @@ def format_combined(booking: dict) -> str:
     lines.append(f"件數：{booking.get('room_count') or 1}")
     smk = booking.get("smoking")
     if smk is True:
-        lines.append("是否吸煙：抽煙")
+        lines.append("是否吸煙：吸菸")
     elif smk is False:
         lines.append("是否吸煙：禁煙")
 
@@ -556,11 +556,11 @@ def _manual_summary(booking: dict, hotel_key: str) -> str:
 
     smk = booking.get("smoking")
     if smk is True:
-        lines.append("🚬 抽煙：已填入特別要求欄")
+        lines.append("🚬 吸菸：已填入特別要求欄")
     elif smk is False:
         lines.append("🚭 禁煙：已填入特別要求欄")
     else:
-        lines.append("ℹ️ 吸煙：未指定（如需標註請在文字輸入「抽煙」或「禁煙」）")
+        lines.append("ℹ️ 吸煙：未指定（如需標註請在文字輸入「吸菸/抽菸」或「禁煙」）")
 
     if booking.get("booker"):
         lines.append(f"📇 訂房人：{booking['booker']}（本表無訂房人欄，僅作記錄）")
@@ -572,7 +572,7 @@ async def book_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 文字下訂（整合證件掃描）\n\n"
         "1) 先貼訂房資料，格式例如：\n"
         "入住：7/21\n退房：7/23\n飯店：倫敦人\n"
-        "房型：維多利亞房大床\n件數：1\n是否吸煙：抽煙\n"
+        "房型：維多利亞房大床\n件數：1\n是否吸煙：吸菸\n"
         "江-泰哥-呂布\n微信：泰哥服務群\n\n"
         "2) 我會請你傳「證件照片」，掃完自動併入這筆訂房，"
         "產出含訂房+證件的最終結果與 Excel。\n"
