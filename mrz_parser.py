@@ -77,6 +77,12 @@ def parse(mrz_lines):
         line2 = next((l for l in longs if l != line1), longs[1])
         return _parse_td3(line1, line2)
 
+    # 單行 TD3 第二行：OCR 常把兩行機讀區打散，只剩第二行。
+    # 第二行仍含 證件號/國籍/生日/性別/效期，足以可靠抽取
+    # （姓名在第一行故缺，改由 OCR 文字補）。
+    if longs and "<" in longs[0]:
+        return _parse_td3_line2(longs[0])
+
     # TD1：含 '<' 且長度 >= 18 的候選行取最長三條
     mrz_like = [l for l in candidates if "<" in l and len(l) >= 18]
     if len(mrz_like) >= 3:
@@ -117,6 +123,25 @@ def _parse_td3(l1: str, l2: str) -> dict:
     res["last_name"] = last
     res["first_name"] = first
     res["doc_number"] = l2[0:9].rstrip("<")
+    res["nationality"] = _region(l2[10:13])
+    res["date_of_birth"] = _parse_date(l2[13:19])
+    res["sex"] = l2[20:21]
+    res["expiry_date"] = _parse_date(l2[21:27])
+    return res
+
+
+def _parse_td3_line2(l2: str) -> dict:
+    """TD3 只剩第二行（OCR 把兩行打散時）的解析。
+
+    TD3 第二行佈局（44 字）：
+      doc(9) chk(1) iss(3) dob(6) chk(1) sex(1) exp(6) chk(1) ...
+    可可靠取得 證件號/發證地/生日/性別/效期；
+    姓名位於第一行，此處無法取得，留待 OCR 文字補。
+    """
+    res = {}
+    res["doc_type_guess"] = "護照(單行MRZ)"
+    res["doc_number"] = l2[0:9].rstrip("<")
+    res["issuer"] = l2[2:5]
     res["nationality"] = _region(l2[10:13])
     res["date_of_birth"] = _parse_date(l2[13:19])
     res["sex"] = l2[20:21]

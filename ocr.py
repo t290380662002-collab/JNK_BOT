@@ -125,9 +125,9 @@ def _extract_mrz_lines(text: str) -> list:
 
 
 def _parse_from_free_text(text: str) -> dict | None:
-    """全頁文字的兜底解析：先找 MRZ 行，再嘗試 regex 撈證件號碼。"""
+    """全頁文字的兜底解析：先找 MRZ 行（含單行第二行），再嘗試 regex 撈證件號碼。"""
     lines = _extract_mrz_lines(text)
-    if len(lines) >= 2:
+    if lines:
         parsed = mrz_parser.parse(lines)
         if parsed:
             return parsed
@@ -176,13 +176,22 @@ def _extract_chinese_fields(text: str) -> dict | None:
             res["doc_number"] = cand
             break
 
-    # 中文姓名：找「姓名/名」標籤後的 2~4 個中文字
-    nm = re.search(r"(?:姓名|名|Name)[：:\s]*([\u4e00-\u9fff]{2,4})", text, re.I)
+    # 中文姓名：標籤（姓名/名/Name）後可能跟「/」、「（」、誤讀字、換行等，
+    # 故允許標籤後最多 20 個「非中文字元」，再抓第一個 2~4 中文字。
+    #   例：'姓名 /Name （Surame, Giver numes）\n鐘明鴻'
+    nm = re.search(r"(?:姓名|名|Name)[^\u4e00-\u9fff]{0,40}([\u4e00-\u9fff]{2,4})", text, re.I)
     if nm:
         res["zh_name"] = nm.group(1)
 
-    # 英文姓名：WU,JUN / WU，JUN 形態（須有逗號，降低誤判；允許逗號後空格）
-    en = re.search(r"\b([A-Z]{2,})[,，]\s*([A-Z]{1,}(?:\s[A-Z]+)?)", text)
+    # 英文姓名：標籤後通常為「姓, 名-名」形態，且常與中文姓名同一區塊。
+    # 1) 優先從「中文姓名之後」的文字找（避開標籤括號內的 Surame, Giver 誤判）
+    # 2) 支援連字號（MING-HUNG）、中文逗號（，）、跨行（\s 含換行）
+    en = None
+    if nm:
+        after = text[nm.end():]
+        en = re.search(r"\b([A-Z]{2,})[,，]\s*([A-Z]+(?:[ -][A-Z]+)*)", after)
+    if not en:
+        en = re.search(r"\b([A-Z]{2,})[,，]\s*([A-Z]+(?:[ -][A-Z]+)*)", text)
     if en:
         res["en_name"] = f"{en.group(1)},{en.group(2).strip()}"
 
@@ -236,19 +245,20 @@ def process_image(image_bytes: bytes) -> dict | None:
         logger.info("啟用雲端 OCR 備援：%s", _cloud_providers)
         cloud_text = _cloud_ocr(image_bytes)
         if cloud_text:
-            parsed = _parse_from_free_text(cloud_text)
-            if parsed:
-                return {
-                    "parsed": parsed,
-                    "confidence": "medium",
-                    "source": f"cloud_{_cloud_providers[0]}",
-                    "raw": cloud_text,
-                }
-            # 無 MRZ：嘗試中文/非 MRZ 證件欄位（港澳通行證正面等）
-            cf = _extract_chinese_fields(cloud_text)
+            cf = _extract_chinese_fields(cloud_text)   # 中英文姓名 + 證件號（OCR 文字）
+            parsed = _parse_from_free_text(cloud_text)  # 含單行 MRZ 第二行解析（doc/dob/sex/nat/exp）
+            # 合併：MRZ 欄位最可靠（證件號/生日），中文姓名以 OCR 文字為主
+            merged: dict = {}
             if cf:
+                merged.update(cf)
+            if parsed:
+                for k in ("doc_number", "date_of_birth", "sex",
+                          "nationality", "expiry_date", "issuer", "doc_type_guess"):
+                    if parsed.get(k):
+                        merged[k] = parsed[k]
+            if merged:
                 return {
-                    "parsed": cf,
+                    "parsed": merged,
                     "confidence": "medium",
                     "source": f"cloud_{_cloud_providers[0]}_text",
                     "raw": cloud_text,
