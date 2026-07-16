@@ -234,6 +234,73 @@ def _extract_chinese_fields(text: str) -> dict | None:
     return res
 
 
+# ---------------------------------------------------------------------------
+# OCR 結果品質檢查（亂碼過濾）
+# ---------------------------------------------------------------------------
+def _is_plausible_name(s: str) -> bool:
+    """英文姓名品質檢查：排除 OCR 雜訊（如 KKKKKK / EEEEEE / 過長重複字元）。"""
+    if not s or not isinstance(s, str):
+        return False
+    core = re.sub(r"[^A-Za-z]", "", s)
+    if len(core) < 3 or len(core) > 30:
+        return False
+    # 連續 4+ 相同字母 -> 雜訊（如 BLERREKKEEEEKKKKK）
+    if re.search(r"([A-Za-z])\1{3,}", core):
+        return False
+    # 各段長度需合理（2~15 字母）
+    parts = re.split(r"[,，\s\-]", s.strip())
+    for p in parts:
+        if p and (len(p) < 2 or len(p) > 15):
+            return False
+    return True
+
+
+def _is_plausible_docnum(s: str) -> bool:
+    """證件號碼品質檢查：至少含 4 位數字，且無 4+ 連續相同字元。"""
+    if not s or not isinstance(s, str):
+        return False
+    s = s.strip().upper()
+    if len(s) < 5 or len(s) > 14:
+        return False
+    # 連續 4+ 相同字元 -> 雜訊
+    if re.search(r"([A-Z0-9])\1{3,}", s):
+        return False
+    # 證件號通常含數字（港澳通行證/護照/身分證皆有），純字母視為可疑
+    return sum(c.isdigit() for c in s) >= 4
+
+
+def _sanitize(parsed: dict) -> dict:
+    """清除明顯的 OCR 雜訊欄位；若清理後無任何有效識別欄位，回傳 {}。
+
+    有效識別欄位：中文姓名 / 英文姓名 / 證件號碼。
+    這能擋掉「讀到一堆亂碼就自信回傳」的狀況——例如英文姓名
+    'BLERREKKEEEEKKKKK KK,'（重複字母）、證件號 'SBLTGPS41'（只有 2 位數字）。
+    """
+    if not parsed:
+        return {}
+    # 中文姓名：僅接受 2~4 個中文字
+    zh = parsed.get("zh_name")
+    if zh and not re.fullmatch(r"[\u4e00-\u9fff]{2,4}", str(zh)):
+        parsed.pop("zh_name", None)
+    # 英文姓名（en_name / last_name+first_name 同步清理）
+    en = parsed.get("en_name")
+    last = parsed.get("last_name")
+    first = parsed.get("first_name")
+    if en and not _is_plausible_name(en):
+        parsed.pop("en_name", None)
+    if last and not _is_plausible_name(f"{last},{first}" if first else last):
+        parsed.pop("last_name", None)
+        parsed.pop("first_name", None)
+    # 證件號碼
+    dn = parsed.get("doc_number")
+    if dn and not _is_plausible_docnum(dn):
+        parsed.pop("doc_number", None)
+    # 至少需有一個有效識別欄位，否則視為掃描失敗
+    if not any(parsed.get(k) for k in ("zh_name", "en_name", "last_name", "doc_number")):
+        return {}
+    return parsed
+
+
 def process_image(image_bytes: bytes) -> dict | None:
     """
     回傳 dict：
@@ -250,6 +317,7 @@ def process_image(image_bytes: bytes) -> dict | None:
 
     if len(lines) >= 2:
         parsed = mrz_parser.parse(lines)
+        parsed = _sanitize(parsed)
         if parsed:
             return {
                 "parsed": parsed,
@@ -279,6 +347,7 @@ def process_image(image_bytes: bytes) -> dict | None:
             # 若 MRZ 沒給英文姓名（單行 MRZ 缺第一行），但 cf 抽到 en_name，則補上
             if not merged.get("en_name") and merged.get("last_name"):
                 merged["en_name"] = f"{merged['last_name']},{merged.get('first_name','')}"
+            merged = _sanitize(merged)
             if merged:
                 return {
                     "parsed": merged,
@@ -311,11 +380,13 @@ def process_image(image_bytes: bytes) -> dict | None:
     except Exception:  # noqa: BLE001
         full = ""
     parsed = _parse_from_free_text(full)
+    parsed = _sanitize(parsed)
     if parsed:
         return {"parsed": parsed, "confidence": "low", "source": "local_text", "raw": full}
 
     # 本地也嘗試中文欄位（Tesseract 雖弱，偶能撈到證件號碼/中文姓名）
     cf = _extract_chinese_fields(full)
+    cf = _sanitize(cf)
     if cf:
         return {
             "parsed": cf,
