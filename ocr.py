@@ -37,6 +37,9 @@ def _available_cloud() -> list:
         return []
     if CLOUD_PROVIDER == "auto":
         out = []
+        # 優先放免費且已設定的提供者（OCR.space 免費、免綁卡），其次雲端大廠
+        if os.environ.get("OCR_SPACE_KEY"):
+            out.append("ocrspace")
         if os.environ.get("GOOGLE_VISION_API_KEY"):
             out.append("google")
         if os.environ.get("AZURE_VISION_ENDPOINT") and os.environ.get("AZURE_VISION_KEY"):
@@ -302,6 +305,8 @@ def _cloud_ocr(image_bytes: bytes) -> str:
             t = _google_vision(image_bytes)
         elif provider == "azure":
             t = _azure_ocr(image_bytes)
+        elif provider == "ocrspace":
+            t = _ocrspace_ocr(image_bytes)
         else:
             continue
         if t:
@@ -357,4 +362,61 @@ def _azure_ocr(image_bytes: bytes) -> str:
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001
         logger.warning("Azure OCR 失敗：%s", e)
+        return ""
+
+
+def _downscale_if_large(image_bytes: bytes, max_bytes: int = 900_000) -> bytes:
+    """OCR.space 免費方案單檔上限 1MB；超過就逐步縮小，避免上傳被拒。"""
+    if len(image_bytes) <= max_bytes:
+        return image_bytes
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        out = image_bytes
+        scale = 1.0
+        for _ in range(6):
+            scale *= 0.8
+            w, h = img.size
+            ni = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            buf = io.BytesIO()
+            ni.save(buf, format="JPEG", quality=85)
+            out = buf.getvalue()
+            if len(out) <= max_bytes:
+                break
+        return out
+    except Exception:  # noqa: BLE001
+        return image_bytes
+
+
+def _ocrspace_ocr(image_bytes: bytes) -> str:
+    """OCR.space 免費 API（免綁卡）：支援繁體中文 cht + 英文，對拍攝照片辨識率佳。"""
+    import requests
+
+    key = os.environ.get("OCR_SPACE_KEY")
+    if not key:
+        return ""
+    url = "https://api.ocr.space/parse/image"
+    # 免費方案單檔 ≤1MB；過大先縮小
+    payload = image_bytes if len(image_bytes) <= 900_000 else _downscale_if_large(image_bytes)
+    try:
+        r = requests.post(
+            url,
+            data={
+                "apikey": key,
+                "language": "cht",      # 繁體中文（含英文識別）
+                "isOverlayRequired": "false",
+                "scale": "true",        # 自動放大低 DPI 內容
+                "OCREngine": "2",       # Engine2 支援語言自動偵測、特殊字元
+            },
+            files={"image": ("id.jpg", payload, "image/jpeg")},
+            timeout=25,
+        )
+        r.raise_for_status()
+        j = r.json()
+        if j.get("IsErroredOnProcessing"):
+            logger.warning("OCR.space 處理錯誤：%s", j.get("ErrorMessage"))
+            return ""
+        texts = [p.get("ParsedText", "") for p in j.get("ParsedResults", [])]
+        return "\n".join(texts)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("OCR.space 例外：%s", e)
         return ""
