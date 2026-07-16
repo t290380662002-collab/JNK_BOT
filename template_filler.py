@@ -208,7 +208,8 @@ def _input_cell(ws, label_cell):
     return ws.cell(row=trow, column=tcol)
 
 
-_DATE_FMT = "yyyy/mm/dd"  # 統一日期顯示格式（Excel 自訂格式，會自動補零且不隨區域變動）
+_DOB_FMT = "yyyy/mm/dd"  # 出生日期固定顯示（補零，不隨區域變動）
+_CHECK_FMT = 'yyyy"年"m"月"d"日"'  # 入住/退房日期：中文長日期（2026年7月21日）
 
 
 def _fill_form_sheet(ws, b: dict):
@@ -233,7 +234,7 @@ def _fill_form_sheet(ws, b: dict):
         cell = _input_cell(ws, lc)
         cell.value = v
         if isinstance(v, datetime):
-            cell.number_format = _DATE_FMT
+            cell.number_format = _CHECK_FMT if field in ("checkin", "checkout") else _DOB_FMT
 
 
 def _safe_sheet_title(base: str, idx: int, surname: str) -> str:
@@ -284,7 +285,7 @@ def _fill_list_sheet(ws, cfg: dict, bookings: list):
         if "dob" in cols and b.get("dob") not in ("", None):
             c = ws.cell(row=row, column=_col_to_idx(cols["dob"]), value=b["dob"])
             if isinstance(b["dob"], datetime):
-                c.number_format = _DATE_FMT
+                c.number_format = _DOB_FMT
         # room（房型）：依用戶指示不填，留空手動補
     # 吸煙欄（僅名匯清單表有）
     scol = cfg.get("list_smoking_col")
