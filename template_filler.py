@@ -208,8 +208,8 @@ def _input_cell(ws, label_cell):
     return ws.cell(row=trow, column=tcol)
 
 
-_DOB_FMT = "yyyy/mm/dd"  # 出生日期固定顯示（補零，不隨區域變動）
-_CHECK_FMT = 'yyyy"年"m"月"d"日"'  # 入住/退房日期：中文長日期（2026年7月21日）
+_DOB_FMT = "yyyy/mm/dd"      # 出生日期固定顯示（補零，不隨區域變動）
+_CHECK_FMT = "yyyy/mm/dd"    # 入住/退房日期：用戶確認為 2026/07/29 格式
 
 
 def _fill_form_sheet(ws, b: dict):
