@@ -350,11 +350,11 @@ def _manual_summary(booking: dict, hotel_key: str) -> str:
 
     smk = booking.get("smoking")
     if smk is True:
-        lines.append("🚬 抽煙：已填入清單表吸煙欄" if cfg.get("list_smoking_col")
-                     else "⚠️ 抽煙：本模板無吸煙欄，已記錄但無法填入，請手寫標註")
+        lines.append("🚬 抽煙：已填入特別要求欄")
     elif smk is False:
-        lines.append("🚭 禁煙：已填入清單表吸煙欄" if cfg.get("list_smoking_col")
-                     else "ℹ️ 禁煙：本模板無吸煙欄")
+        lines.append("🚭 禁煙：已填入特別要求欄")
+    else:
+        lines.append("ℹ️ 吸煙：未指定（如需標註請在文字輸入「抽煙」或「禁煙」）")
 
     if booking.get("booker"):
         lines.append(f"📇 訂房人：{booking['booker']}（本表無訂房人欄，僅作記錄）")
@@ -370,7 +370,7 @@ async def book_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "江-泰哥-呂布\n微信：泰哥服務群\n\n"
         "我會自動解析並產出該酒店訂房單。\n"
         "英文姓名 / 證件號碼 / 出生日期（無護照時）與房型 留空手動補；"
-        "抽煙僅名匯模板有欄位會自動填，其餘酒店會提醒手寫。"
+        "吸煙與否會填入「特別要求 Special request」欄。"
     )
 
 

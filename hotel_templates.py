@@ -31,6 +31,7 @@ FORM_LABELS = {
     "checkout": ["退房日期", "C/O Date"],
     "pax": ["人數", "Pax"],
     "rooms": ["No.of Rooms", "Rooms("],
+    "special_request": ["特別要求", "Special request"],
 }
 
 HOTELS = {
