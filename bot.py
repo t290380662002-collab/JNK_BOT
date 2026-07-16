@@ -74,6 +74,10 @@ def fmt_result(r: dict) -> str:
     for k, label in label_map.items():
         if p.get(k):
             lines.append(f"• {label}：{p[k]}")
+    if p.get("zh_name"):
+        lines.append(f"• 中文姓名：{p['zh_name']}")
+    if r.get("no_mrz"):
+        lines.append("• 備註：未偵測到 MRZ，欄位由照片文字擷取，請務必核對")
     return "\n".join(lines)
 
 
@@ -137,16 +141,32 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not result or not result.get("parsed"):
+        # 診斷：雲端 OCR 是否已啟用（有無可用提供者）
+        cloud_on = bool(ocr._available_cloud())
+        hint = (
+            "💡 小提示：\n"
+            "• 護照/卡式證件的機讀碼（MRZ）通常在「背面」，請拍背面那兩行字；\n"
+            "• 港澳通行證/回鄉證正面（中文面）沒有 MRZ，需靠雲端 OCR 讀取中文欄位——"
+            + ("目前已啟用 ✅\n" if cloud_on else "目前尚未啟用雲端 OCR ❌（請先啟用 Google Vision API）\n")
+            + "• 若仍困難，最穩的方式是用 /book 直接輸入資料。"
+        )
         await update.message.reply_text(
-            "⚠️ 無法從這張照片辨識出機讀碼（MRZ）。\n"
-            "請重拍：光線充足、證件攤平、底部機讀碼清晰對焦；\n"
-            "或改用 /book 直接輸入資料。"
+            "⚠️ 無法從這張照片辨識出可用欄位（MRZ 或中文欄位皆未讀到）。\n"
+            "請重拍：光線充足、證件攤平、字跡清晰對焦；\n"
+            f"{hint}"
         )
         return
 
     sess = get_session(chat_id)
     key = uuid.uuid4().hex
     sess["pending"][key] = result
+
+    note = ""
+    if result.get("no_mrz"):
+        note = (
+            "\n⚠️ 這張照片沒有標準機讀碼（MRZ），我已從照片文字擷取部分欄位。"
+            "請務必核對「證件號碼 / 姓名」是否正確，有誤請改以 /book 輸入。"
+        )
 
     kb = InlineKeyboardMarkup(
         [[InlineKeyboardButton(t, callback_data=f"type|{key}|{t}") for t in DOC_TYPES]]
@@ -155,6 +175,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fmt_result(result)
         + "\n\n"
         + format_passport_text(result)
+        + note
         + "\n\n請選擇證件類型：",
         reply_markup=kb,
     )

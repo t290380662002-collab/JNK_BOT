@@ -101,6 +101,18 @@ def _normalize_record(rec: dict) -> dict:
         b["docnum"] = _doc_value(parsed)
         b["dob"] = _date_value(parsed.get("date_of_birth"))
         b["en"] = _en_name(parsed)
+        zh = (parsed.get("zh_name") or "").strip()
+        en = (parsed.get("en_name") or "").strip()
+        if zh:
+            b["zh"] = zh
+        if en:
+            b["en"] = en.upper()
+            s, f = _split_en_name(en)
+            b["surname"], b["firstname"] = s.upper(), f.upper()
+        elif zh:
+            # 無英文時用中文拆 姓/名
+            s, f = _split_name(zh)
+            b["surname"], b["firstname"] = s, f
         # 掃描無中文姓名/房型 -> 留空手動補
     manual = rec.get("manual") or rec.get("booking")
     if manual:

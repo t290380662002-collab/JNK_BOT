@@ -135,6 +135,58 @@ def _parse_from_free_text(text: str) -> dict | None:
     return None
 
 
+def _extract_chinese_fields(text: str) -> dict | None:
+    """從全頁 OCR 文字抽取「無 MRZ 證件」的中文/英文欄位。
+
+    適用對象：港澳通行證(正面)、回鄉證、台胞證、身份證等沒有標準機讀區的證件。
+    這些證件照片即使拍正面，雲端 OCR 也能讀出「姓名 / 證件號碼 / 出生」等欄位。
+
+    回傳 parsed dict（部分欄位可能有值），或 None（完全無可擷取欄位）。
+    欄位設計與 MRZ 解析器相容：doc_number / date_of_birth / zh_name / en_name。
+    """
+    res: dict = {}
+
+    # 證件號碼：OCR 常在字母數字間塞空格（如 "C J 9 3 1..."），先去掉內部空白
+    collapsed = re.sub(r"(?<=[A-Z0-9])\s+(?=[A-Z0-9])", "", text)
+    # 港澳通行證 C+8 位(字母或數字) / 台胞證 / 回鄉證 等
+    # 例：CJ9314108（C + J9314108）、C12345678
+    m = re.search(r"(?<![0-9A-Z])([CEHDAK][A-Z0-9]{8})(?![0-9A-Z])", collapsed)
+    if not m:
+        # 退一步：孤立的 8~9 位數字串（較不精確，僅備用）
+        m = re.search(r"(?<![0-9])([0-9]{8,9})(?![0-9])", collapsed)
+    if m:
+        res["doc_number"] = m.group(1)
+
+    # 中文姓名：找「姓名/名」標籤後的 2~4 個中文字
+    nm = re.search(r"(?:姓名|名|Name)[：:\s]*([\u4e00-\u9fff]{2,4})", text, re.I)
+    if nm:
+        res["zh_name"] = nm.group(1)
+
+    # 英文姓名：WU,JUN / WU，JUN 形態（須有逗號，降低誤判）
+    en = re.search(r"\b([A-Z]{2,})[,，]([A-Z]{1,}(?:\s[A-Z]+)?)", text)
+    if en:
+        res["en_name"] = f"{en.group(1)},{en.group(2).strip()}"
+
+    # 出生日期：出生/出生日期/Birth + 1981.07.08 / 1981年07月08日 / 1981-07-08
+    dm = re.search(
+        r"(?:出生|出生日期|Birth|DOB)[：:\s]*"
+        r"(\d{4})[./年\-](\d{1,2})[./月\-](\d{1,2})",
+        text, re.I,
+    )
+    if dm:
+        try:
+            res["date_of_birth"] = (
+                f"{dm.group(1)}-{int(dm.group(2)):02d}-{int(dm.group(3)):02d}"
+            )
+        except ValueError:
+            pass
+
+    if not res:
+        return None
+    res["doc_type_guess"] = "證件(無MRZ)"
+    return res
+
+
 def process_image(image_bytes: bytes) -> dict | None:
     """
     回傳 dict：
@@ -173,6 +225,16 @@ def process_image(image_bytes: bytes) -> dict | None:
                     "source": f"cloud_{_cloud_providers[0]}",
                     "raw": cloud_text,
                 }
+            # 無 MRZ：嘗試中文/非 MRZ 證件欄位（港澳通行證正面等）
+            cf = _extract_chinese_fields(cloud_text)
+            if cf:
+                return {
+                    "parsed": cf,
+                    "confidence": "medium",
+                    "source": f"cloud_{_cloud_providers[0]}_text",
+                    "raw": cloud_text,
+                    "no_mrz": True,
+                }
     elif CLOUD_PROVIDER not in ("none", "", "false"):
         logger.warning("OCR_PROVIDER=%s 但缺少對應金鑰，雲端備援未啟用", CLOUD_PROVIDER)
 
@@ -186,6 +248,17 @@ def process_image(image_bytes: bytes) -> dict | None:
     parsed = _parse_from_free_text(full)
     if parsed:
         return {"parsed": parsed, "confidence": "low", "source": "local_text", "raw": full}
+
+    # 本地也嘗試中文欄位（Tesseract 雖弱，偶能撈到證件號碼/中文姓名）
+    cf = _extract_chinese_fields(full)
+    if cf:
+        return {
+            "parsed": cf,
+            "confidence": "low",
+            "source": "local_text",
+            "raw": full,
+            "no_mrz": True,
+        }
 
     return None
 
