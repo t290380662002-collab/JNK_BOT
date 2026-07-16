@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 CLOUD_PROVIDER = os.environ.get("OCR_PROVIDER", "none").lower()
 MRZ_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
 
+OCR_LANG = "eng+chi_tra"  # 本地 OCR 多語言：英文 MRZ + 繁體中文姓名/欄位
+
 
 def _available_cloud() -> list:
     """回傳當前可用的雲端 OCR 提供者清單。
@@ -176,8 +178,8 @@ def _extract_chinese_fields(text: str) -> dict | None:
     if nm:
         res["zh_name"] = nm.group(1)
 
-    # 英文姓名：WU,JUN / WU，JUN 形態（須有逗號，降低誤判）
-    en = re.search(r"\b([A-Z]{2,})[,，]([A-Z]{1,}(?:\s[A-Z]+)?)", text)
+    # 英文姓名：WU,JUN / WU，JUN 形態（須有逗號，降低誤判；允許逗號後空格）
+    en = re.search(r"\b([A-Z]{2,})[,，]\s*([A-Z]{1,}(?:\s[A-Z]+)?)", text)
     if en:
         res["en_name"] = f"{en.group(1)},{en.group(2).strip()}"
 
@@ -252,11 +254,16 @@ def process_image(image_bytes: bytes) -> dict | None:
     elif CLOUD_PROVIDER not in ("none", "", "false"):
         logger.warning("OCR_PROVIDER=%s 但缺少對應金鑰，雲端備援未啟用", CLOUD_PROVIDER)
 
-    # 3) 本地全頁文字兜底（無白名單）撈證件號碼
+    # 3) 本地全頁文字兜底（eng+chi_tra 多語言）撈證件號碼 / 中文欄位
     try:
-        full = pytesseract.image_to_string(
-            Image.open(io.BytesIO(image_bytes)).convert("L"), config="--psm 6"
-        )
+        img_full = Image.open(io.BytesIO(image_bytes)).convert("L")
+        full = pytesseract.image_to_string(img_full, lang=OCR_LANG, config="--psm 6")
+        # 額外針對「上半部（中文姓名常出現區域）」做一次繁中聚焦 OCR，
+        # 提升中文姓名擷取率（護照正面照片姓名多在照片右側/上半）。
+        w, h = img_full.size
+        top = img_full.crop((0, 0, w, int(h * 0.6)))
+        top_text = pytesseract.image_to_string(top, lang="chi_tra", config="--psm 6")
+        full = full + "\n" + top_text
     except Exception:  # noqa: BLE001
         full = ""
     parsed = _parse_from_free_text(full)
