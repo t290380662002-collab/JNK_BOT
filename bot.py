@@ -490,11 +490,19 @@ async def _run_webhook_server(app: Application, base: str):
         return web.Response(text="ok")
 
     async def handle_health(request: web.Request):
+        # 診斷：回報 OCR 雲端提供者狀態，便於遠端確認 key 是否被容器載入
+        try:
+            import ocr as _ocr
+            _cloud = _ocr._available_cloud()
+        except Exception:  # noqa: BLE001
+            _cloud = ["<import_failed>"]
         return web.json_response({
             "status": "ok",
             "ready": diag["ready"],
             "webhook_url": diag["webhook_url"],
             "error": str(diag["error"]) if diag["error"] else None,
+            "ocr_space_key_loaded": bool(os.environ.get("OCR_SPACE_KEY")),
+            "cloud_providers": _cloud,
         })
 
     aio_app = web.Application()
