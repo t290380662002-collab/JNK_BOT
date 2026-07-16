@@ -59,6 +59,20 @@ def get_session(chat_id: int) -> dict:
     return sessions.setdefault(chat_id, {"records": [], "pending": {}})
 
 
+def _norm_dob(s) -> str:
+    """把任意日期字串統一為 YYYY/MM/DD（與 Excel 輸出一致）。
+    支援 1982.01.09 / 1982-01-09 / 1982/01/09 / 1982年01月09日 / 1982.1.9 等。"""
+    if not isinstance(s, str):
+        return s
+    m = re.match(
+        r"^\s*(\d{4})\s*[./年\-]\s*(\d{1,2})\s*[./月\-]\s*(\d{1,2})\s*日?\s*$",
+        s,
+    )
+    if m:
+        return f"{int(m.group(1)):04d}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
+    return s
+
+
 def fmt_result(r: dict) -> str:
     p = r.get("parsed", {})
     lines = [f"✅ 辨識完成（信心：{r.get('confidence')}｜來源：{r.get('source')}）"]
@@ -73,8 +87,11 @@ def fmt_result(r: dict) -> str:
         "issuer": "發證代碼",
     }
     for k, label in label_map.items():
-        if p.get(k):
-            lines.append(f"• {label}：{p[k]}")
+        v = p.get(k)
+        if v:
+            if k in ("date_of_birth", "expiry_date"):
+                v = _norm_dob(v)
+            lines.append(f"• {label}：{v}")
     if p.get("zh_name"):
         lines.append(f"• 中文姓名：{p['zh_name']}")
     if r.get("no_mrz"):
@@ -96,9 +113,9 @@ def format_passport_text(r: dict) -> str:
     else:
         en = last or "（未提供）"
     dob = p.get("date_of_birth") or "（未提供）"
-    # 統一出生日期顯示為 YYYY/MM/DD（與 Excel 輸出一致）
-    if isinstance(dob, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", dob):
-        dob = dob.replace("-", "/")
+    # 統一出生日期顯示為 YYYY/MM/DD（與 Excel 輸出一致），
+    # 任何來源（MRZ 破折號 / OCR 可見文字的點號 / 中文年月日）都歸一化。
+    dob = _norm_dob(dob)
     doc = p.get("doc_number") or "（未提供）"
     return (
         "讀取證件完畢，回傳文字：\n"
