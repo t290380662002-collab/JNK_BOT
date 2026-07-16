@@ -208,6 +208,9 @@ def _input_cell(ws, label_cell):
     return ws.cell(row=trow, column=tcol)
 
 
+_DATE_FMT = "yyyy/mm/dd"  # 統一日期顯示格式（Excel 自訂格式，會自動補零且不隨區域變動）
+
+
 def _fill_form_sheet(ws, b: dict):
     """label-driven 填一張訂房單主表格（只填有值的欄，避免清掉模板）。"""
     values = {
@@ -227,7 +230,10 @@ def _fill_form_sheet(ws, b: dict):
         v = values.get(field, "")
         if v == "" or v is None:
             continue
-        _input_cell(ws, lc).value = v
+        cell = _input_cell(ws, lc)
+        cell.value = v
+        if isinstance(v, datetime):
+            cell.number_format = _DATE_FMT
 
 
 def _safe_sheet_title(base: str, idx: int, surname: str) -> str:
@@ -276,7 +282,9 @@ def _fill_list_sheet(ws, cfg: dict, bookings: list):
         if "doc" in cols and b.get("docnum"):
             ws.cell(row=row, column=_col_to_idx(cols["doc"]), value=b["docnum"])
         if "dob" in cols and b.get("dob") not in ("", None):
-            ws.cell(row=row, column=_col_to_idx(cols["dob"]), value=b["dob"])
+            c = ws.cell(row=row, column=_col_to_idx(cols["dob"]), value=b["dob"])
+            if isinstance(b["dob"], datetime):
+                c.number_format = _DATE_FMT
         # room（房型）：依用戶指示不填，留空手動補
     # 吸煙欄（僅名匯清單表有）
     scol = cfg.get("list_smoking_col")

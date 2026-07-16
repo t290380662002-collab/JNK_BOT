@@ -7,6 +7,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 
@@ -92,6 +93,9 @@ def format_passport_text(r: dict) -> str:
     else:
         en = last or "（未提供）"
     dob = p.get("date_of_birth") or "（未提供）"
+    # 統一出生日期顯示為 YYYY/MM/DD（與 Excel 輸出一致）
+    if isinstance(dob, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", dob):
+        dob = dob.replace("-", "/")
     doc = p.get("doc_number") or "（未提供）"
     return (
         "讀取證件完畢，回傳文字：\n"
