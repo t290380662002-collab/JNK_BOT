@@ -249,6 +249,20 @@ async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess.pop("pending_booking", None)
 
 
+async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/scan：進入純掃證件模式（不綁訂房），掃完用 /export 匯出。"""
+    chat_id = update.message.chat_id
+    sess = get_session(chat_id)
+    # 清空整合流程狀態，避免與訂房掃描混淆
+    sess.pop("awaiting_passport", None)
+    sess.pop("pending_booking", None)
+    sess["scan_mode"] = True
+    await update.message.reply_text(
+        "📸 純掃證件模式已開啟：請傳送證件照片，"
+        "掃描完成後用 /export 選酒店匯出。"
+    )
+
+
 async def skip_passport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """inline 按鈕「跳過證件」的處理。"""
     q = update.callback_query
@@ -279,6 +293,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "（自動填英文姓名、證件號碼、出生日期；中文姓名與房型請手動補）\n\n"
         "指令：\n"
         "  /book    ─ 以文字下訂（貼上入住/退房/飯店/姓名等）\n"
+        "  /scan    ─ 純掃證件模式（不訂房，掃完用 /export 匯出）\n"
         "  /export  ─ 選酒店並產生訂房單 Excel（掃描證件後）\n"
         "  /list    ─ 查看已掃描筆數與摘要\n"
         "  /clear   ─ 清空目前暫存\n"
@@ -342,28 +357,38 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sess.pop("pending_booking", None)
         return
 
-    # ===== 原本的掃描流程（無訂房上下文，進暫存取 /export）=====
-    key = uuid.uuid4().hex
-    sess["pending"][key] = result
-
-    note = ""
-    if result.get("no_mrz"):
-        note = (
-            "\n⚠️ 這張照片沒有標準機讀碼（MRZ），我已從照片文字擷取部分欄位。"
-            "請務必核對「證件號碼 / 姓名」是否正確，有誤請改以 /book 輸入。"
+    # ===== 純掃證件模式（需先 /scan 顯式開啟；預設關閉）=====
+    # 預設路徑：必須先貼訂房文字（/book），才能掃證件併入訂房。
+    if sess.get("scan_mode"):
+        key = uuid.uuid4().hex
+        sess["pending"][key] = result
+        note = ""
+        if result.get("no_mrz"):
+            note = (
+                "\n⚠️ 這張照片沒有標準機讀碼（MRZ），我已從照片文字擷取部分欄位。"
+                "請務必核對「證件號碼 / 姓名」是否正確，有誤請改以 /book 輸入。"
+            )
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(t, callback_data=f"type|{key}|{t}") for t in DOC_TYPES]]
         )
+        await update.message.reply_text(
+            fmt_result(result)
+            + "\n\n"
+            + format_passport_text(result)
+            + note
+            + "\n\n請選擇證件類型：",
+            reply_markup=kb,
+        )
+        sess.pop("scan_mode", None)
+        return
 
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(t, callback_data=f"type|{key}|{t}") for t in DOC_TYPES]]
-    )
+    # ===== 未先下訂房：依順序要求先貼訂房資料 =====
     await update.message.reply_text(
-        fmt_result(result)
-        + "\n\n"
-        + format_passport_text(result)
-        + note
-        + "\n\n請選擇證件類型：",
-        reply_markup=kb,
+        "📋 請先貼上『訂房資料』（輸入 /book 看格式），\n"
+        "貼完我會引導你掃證件並自動併入這筆訂房。\n"
+        "（若只需純掃證件不訂房，請先輸入 /scan 再傳照片）"
     )
+    return
 
 
 async def type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -561,6 +586,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     chat_id = update.message.chat_id
     sess = get_session(chat_id)
+    # 貼訂房文字即視為開始整合流程，清除純掃描模式狀態
+    sess.pop("scan_mode", None)
     # 整合流程中：正在等證件照，忽略其他文字（避免重複觸發）
     if sess.get("awaiting_passport"):
         await update.message.reply_text(
@@ -775,6 +802,7 @@ def main():
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CommandHandler("skip", skip_cmd))
+    app.add_handler(CommandHandler("scan", scan_cmd))
     app.add_handler(CallbackQueryHandler(type_callback, pattern=r"^type\|"))
     app.add_handler(CallbackQueryHandler(hotel_callback, pattern=r"^hotel\|"))
     app.add_handler(CallbackQueryHandler(bookhotel_callback, pattern=r"^bookhotel\|"))
