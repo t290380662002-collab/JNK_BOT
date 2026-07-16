@@ -148,14 +148,28 @@ def _extract_chinese_fields(text: str) -> dict | None:
 
     # 證件號碼：OCR 常在字母數字間塞空格（如 "C J 9 3 1..."），先去掉內部空白
     collapsed = re.sub(r"(?<=[A-Z0-9])\s+(?=[A-Z0-9])", "", text)
+
+    # 誤判黑名單：證件上常見的英文單字，絕不能當成證件號碼
+    _WORD_BLACKLIST = {
+        "PASSPORT", "DPASSPORT", "REPUBLIC", "NATIONAL", "IDENTITY",
+        "DOCUMENT", "SURNAME", "GENDER", "NATION", "AUTHORITY", "PERMIT",
+    }
+
+    def _valid_docnum(cand: str) -> bool:
+        """真證件號需含足夠數字；純英文單字（如 PASSPORT）一律拒絕。"""
+        if cand.upper() in _WORD_BLACKLIST:
+            return False
+        digits = sum(c.isdigit() for c in cand)
+        return digits >= 4  # 港澳通行證/護照號碼至少含 4 位以上數字
+
     # 港澳通行證 C+8 位(字母或數字) / 台胞證 / 回鄉證 等
     # 例：CJ9314108（C + J9314108）、C12345678
-    m = re.search(r"(?<![0-9A-Z])([CEHDAK][A-Z0-9]{8})(?![0-9A-Z])", collapsed)
-    if not m:
-        # 退一步：孤立的 8~9 位數字串（較不精確，僅備用）
-        m = re.search(r"(?<![0-9])([0-9]{8,9})(?![0-9])", collapsed)
-    if m:
-        res["doc_number"] = m.group(1)
+    doc_cands = re.findall(r"(?<![0-9A-Z])([CEHDAK][A-Z0-9]{8})(?![0-9A-Z])", collapsed)
+    doc_cands += re.findall(r"(?<![0-9])([0-9]{8,9})(?![0-9])", collapsed)
+    for cand in doc_cands:
+        if _valid_docnum(cand):
+            res["doc_number"] = cand
+            break
 
     # 中文姓名：找「姓名/名」標籤後的 2~4 個中文字
     nm = re.search(r"(?:姓名|名|Name)[：:\s]*([\u4e00-\u9fff]{2,4})", text, re.I)
