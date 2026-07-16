@@ -126,6 +126,149 @@ def format_passport_text(r: dict) -> str:
     )
 
 
+def _fmt_ci(d):
+    """check_in/out（YYYY-MM-DD）-> 顯示字串：今年顯 M/D，跨年顯 YYYY/M/D。"""
+    if not d:
+        return "?"
+    try:
+        y, m, day = str(d).split("-")
+        if int(y) == datetime.now().year:
+            return f"{int(m)}/{int(day)}"
+        return f"{y}/{int(m)}/{int(day)}"
+    except Exception:
+        return str(d)
+
+
+def format_combined(booking: dict) -> str:
+    """產出「訂房 + 證件」合併文字（對應使用者描述的『最後產生』區塊）。"""
+    hotel_key = booking.get("hotel")
+    hotel_name = (HT.HOTELS.get(hotel_key, {}).get("name", "?").split(" ")[0]
+                  if hotel_key else "?")
+    lines = [
+        f"入住：{_fmt_ci(booking.get('check_in'))}",
+        f"退房：{_fmt_ci(booking.get('check_out'))}",
+        f"飯店：{hotel_name}",
+    ]
+    if booking.get("room_type"):
+        lines.append(f"房型：{booking['room_type']}")
+    lines.append(f"件數：{booking.get('room_count') or 1}")
+    smk = booking.get("smoking")
+    if smk is True:
+        lines.append("是否吸煙：抽煙")
+    elif smk is False:
+        lines.append("是否吸煙：禁煙")
+
+    g = (booking.get("guests") or [{}])[0]
+    lines.append("")
+    lines.append(f"入住者中文：{g.get('zh_name') or '（未提供）'}")
+    lines.append(f"入住者英文：{g.get('en_name') or '（未提供）'}")
+    lines.append(f"出生年月日：{_norm_dob(g.get('dob') or '') or '（未提供）'}")
+    lines.append(f"證件號碼：{g.get('doc_number') or '（未提供）'}")
+
+    booker = booking.get("booker")
+    if booker:
+        line = booker
+        if booking.get("wechat"):
+            line += f" 微信：{booking['wechat']}"
+        lines.append("")
+        lines.append(line)
+    return "\n".join(lines)
+
+
+async def _prompt_passport(target, context):
+    """提示使用者傳證件照；target 可為 Message 或 CallbackQuery。"""
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⏭️ 跳過證件，直接產單", callback_data="skip_passport")]]
+    )
+    text = (
+        "📋 訂房資料已收到。請傳送客人的「證件照片」完成掃描，"
+        "我會自動併入這筆訂房；\n若暫無證件，請按「跳過」直接產生訂房單。"
+    )
+    msg = target.message if hasattr(target, "message") else target
+    await msg.reply_text(text, reply_markup=kb)
+
+
+async def _produce_combined(chat_id, context, update, booking, note=""):
+    """產出合併文字 + 填好的訂房單 Excel。"""
+    hotel_key = booking.get("hotel")
+    if not hotel_key:
+        await context.bot.send_message(chat_id, "⚠️ 缺少飯店資訊，無法產生訂房單。")
+        return
+    text = format_combined(booking)
+    if note:
+        text += "\n\n" + note
+    await context.bot.send_message(chat_id, text)
+    # Excel：確保至少一位客人，避免 fill_manual 報「無客人資料」
+    if not booking.get("guests"):
+        booking["guests"] = [{}]
+    try:
+        path = await asyncio.to_thread(template_filler.fill_manual, hotel_key, booking)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        zh = HT.HOTELS[hotel_key]["name"].split(" ")[0]
+        fname = f"{zh}_整合_{ts}.xlsx"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("整合訂房單產生失敗")
+        await context.bot.send_message(chat_id, f"❌ Excel 產生失敗：{e}")
+        return
+    with open(path, "rb") as f:
+        await context.bot.send_document(chat_id=chat_id, document=f, filename=fname)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _prepare_skip(booking: dict) -> dict:
+    """跳過證件：無 inline 入住者* 時，獨立中文行視為訂房人，入住者留空。"""
+    if not booking.get("_has_primary"):
+        if not booking.get("booker") and booking.get("guests"):
+            booking["booker"] = "、".join(
+                g.get("zh_name", "") for g in booking["guests"] if g.get("zh_name")
+            )
+        booking["guests"] = [{}]
+    booking.pop("_has_primary", None)
+    return booking
+
+
+async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/skip：跳過證件掃描，直接以現有訂房資料產單。"""
+    chat_id = update.message.chat_id
+    sess = get_session(chat_id)
+    booking = sess.get("pending_booking")
+    if not booking or not sess.get("awaiting_passport"):
+        await update.message.reply_text(
+            "目前沒有等待證件的訂房。先用 /book 貼上訂房資料。"
+        )
+        return
+    _prepare_skip(booking)
+    await _produce_combined(
+        chat_id, context, update, booking,
+        "（已跳過證件掃描，入住者欄位留空，請手動補）",
+    )
+    sess.pop("awaiting_passport", None)
+    sess.pop("pending_booking", None)
+
+
+async def skip_passport_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """inline 按鈕「跳過證件」的處理。"""
+    q = update.callback_query
+    await q.answer()
+    chat_id = q.message.chat_id
+    sess = get_session(chat_id)
+    booking = sess.get("pending_booking")
+    if not booking or not sess.get("awaiting_passport"):
+        await q.edit_message_text("目前沒有等待證件的訂房。請先用 /book 貼上訂房資料。")
+        return
+    _prepare_skip(booking)
+    await q.edit_message_text("⏳ 正在產生訂房單（已跳過證件）…")
+    await _produce_combined(
+        chat_id, context, update, booking,
+        "（已跳過證件掃描，入住者欄位留空，請手動補）",
+    )
+    sess.pop("awaiting_passport", None)
+    sess.pop("pending_booking", None)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📸 證件掃描 Bot\n\n"
@@ -150,6 +293,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
+    sess = get_session(chat_id)
     await update.message.reply_text("🔍 辨識中…")
 
     photo = update.message.photo[-1]
@@ -174,6 +318,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + ("目前已啟用 ✅\n" if cloud_on else "目前尚未啟用雲端 OCR ❌（請先啟用 Google Vision API）\n")
             + "• 若仍困難，最穩的方式是用 /book 直接輸入資料。"
         )
+        if sess.get("awaiting_passport"):
+            await update.message.reply_text(
+                "⚠️ 這張證件沒讀到可用欄位，請重拍；或輸入 /skip 直接產單。\n" + hint
+            )
+            return
         await update.message.reply_text(
             "⚠️ 無法從這張照片辨識出可用欄位（MRZ 或中文欄位皆未讀到）。\n"
             "請重拍：光線充足、證件攤平、字跡清晰對焦；\n"
@@ -181,7 +330,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    sess = get_session(chat_id)
+    # ===== 整合流程：/book 後等待證件照 =====
+    if sess.get("awaiting_passport") and sess.get("pending_booking"):
+        booking = sess["pending_booking"]
+        text_booking.merge_passport(booking, result)
+        note = ""
+        if result.get("no_mrz"):
+            note = "⚠️ 這張照片沒標準 MRZ，欄位由照片文字擷取，請核對證件號碼/姓名。"
+        await _produce_combined(chat_id, context, update, booking, note)
+        sess.pop("awaiting_passport", None)
+        sess.pop("pending_booking", None)
+        return
+
+    # ===== 原本的掃描流程（無訂房上下文，進暫存取 /export）=====
     key = uuid.uuid4().hex
     sess["pending"][key] = result
 
@@ -383,26 +544,47 @@ def _manual_summary(booking: dict, hotel_key: str) -> str:
 
 async def book_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📝 文字下訂\n\n"
-        "直接把訂房資料貼給我，格式例如：\n"
+        "📝 文字下訂（整合證件掃描）\n\n"
+        "1) 先貼訂房資料，格式例如：\n"
         "入住：7/21\n退房：7/23\n飯店：倫敦人\n"
         "房型：維多利亞房大床\n件數：1\n是否吸煙：抽煙\n"
         "江-泰哥-呂布\n微信：泰哥服務群\n\n"
-        "我會自動解析並產出該酒店訂房單。\n"
-        "英文姓名 / 證件號碼 / 出生日期（無護照時）與房型 留空手動補；"
+        "2) 我會請你傳「證件照片」，掃完自動併入這筆訂房，"
+        "產出含訂房+證件的最終結果與 Excel。\n"
+        "（暫無證件可輸入 /skip 直接產單；房型仍留空手動補）\n\n"
+        "英文姓名 / 證件號碼 / 出生日期 由證件掃描自動填入；"
         "吸煙與否會填入「特別要求 Special request」欄。"
     )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
+    chat_id = update.message.chat_id
+    sess = get_session(chat_id)
+    # 整合流程中：正在等證件照，忽略其他文字（避免重複觸發）
+    if sess.get("awaiting_passport"):
+        await update.message.reply_text(
+            "📸 請傳送客人的「證件照片」完成掃描，或輸入 /skip 跳過證件直接產單。"
+        )
+        return
     if not _looks_like_booking(text):
         await update.message.reply_text(
             "請傳送證件『照片』，或用 /book 文字下訂、/export、/list、/clear 指令。"
         )
         return
     booking = text_booking.parse(text)
-    await process_manual_booking(update.message.chat_id, context, booking, update)
+    if not booking.get("hotel"):
+        # 飯店不明 -> 先選飯店，選完再進入「待掃證件」狀態
+        sess["pending_booking"] = booking
+        await update.message.reply_text(
+            "未偵測到飯店，請選擇要填入的酒店訂房單：",
+            reply_markup=_hotel_keyboard("bookhotel"),
+        )
+        return
+    # 有飯店 -> 進入「待掃證件」狀態，提示傳證件照
+    sess["pending_booking"] = booking
+    sess["awaiting_passport"] = True
+    await _prompt_passport(update.message, context)
 
 
 async def process_manual_booking(chat_id, context, booking, update):
@@ -456,23 +638,14 @@ async def bookhotel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     cfg = HT.HOTELS.get(key, {})
     label = cfg.get("name", key)
-    await q.edit_message_text(f"⏳ 正在產生「{label.split(' ')[0]}」訂房單…")
-    try:
-        path = await asyncio.to_thread(template_filler.fill_manual, key, booking)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        zh = label.split(" ")[0]
-        fname = f"{zh}_文字_{ts}.xlsx"
-    except Exception as e:  # noqa: BLE001
-        logger.exception("文字訂房產生失敗")
-        await q.edit_message_text(f"❌ 產生失敗：{e}")
-        return
-    with open(path, "rb") as f:
-        await context.bot.send_document(chat_id=chat_id, document=f, filename=fname)
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-    await context.bot.send_message(chat_id, _manual_summary(booking, key))
+    booking["hotel"] = key
+    sess["pending_booking"] = booking
+    sess["awaiting_passport"] = True
+    await q.edit_message_text(
+        f"已選擇「{label.split(' ')[0]}」。請傳送客人的「證件照片」，"
+        "或輸入 /skip 直接產生訂房單。"
+    )
+    await _prompt_passport(q, context)
 
 
 async def _run_webhook_server(app: Application, base: str):
@@ -601,9 +774,11 @@ def main():
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("clear", clear_cmd))
+    app.add_handler(CommandHandler("skip", skip_cmd))
     app.add_handler(CallbackQueryHandler(type_callback, pattern=r"^type\|"))
     app.add_handler(CallbackQueryHandler(hotel_callback, pattern=r"^hotel\|"))
     app.add_handler(CallbackQueryHandler(bookhotel_callback, pattern=r"^bookhotel\|"))
+    app.add_handler(CallbackQueryHandler(skip_passport_callback, pattern=r"^skip_passport$"))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 

@@ -181,6 +181,60 @@ def parse(text: str) -> dict:
         booking["pax"] = len(booking["guests"])
     if booking["room_count"] is None:
         booking["room_count"] = 1
+    booking["_has_primary"] = has_primary
+    return booking
+
+
+def _passport_guest(parsed: dict) -> dict:
+    """把掃描證件 parsed 轉成 guest dict（只含非空欄位）。
+    生日歸一化為 YYYY-MM-DD（處理點號 / 中文年月日）。"""
+    parsed = parsed or {}
+    last = (parsed.get("last_name") or "").strip().upper()
+    first = (parsed.get("first_name") or "").strip().upper()
+    en = parsed.get("en_name")
+    if not en and last:
+        en = f"{last},{first}"
+    zh = (parsed.get("zh_name") or "").strip()
+    doc = (parsed.get("doc_number") or "").strip()
+    dob = parsed.get("date_of_birth") or ""
+    if dob:
+        nd = _parse_date(dob)          # -> YYYY-MM-DD（支援 1982.01.09 / 1982年01月09日）
+        if nd:
+            dob = nd
+    g = {}
+    if zh:
+        g["zh_name"] = zh
+    if en:
+        g["en_name"] = en
+    if doc:
+        g["doc_number"] = doc
+    if dob:
+        g["dob"] = dob
+    return g
+
+
+def merge_passport(booking: dict, passport_result: dict) -> dict:
+    """把掃描證件結果併入文字訂房：證件欄位成為「入住者」；
+    若原文字沒有 inline 入住者* 欄位，原本的獨立中文行（如「江-泰哥-呂布」）
+    視為「訂房人」，不應成為入住者。"""
+    pg = _passport_guest((passport_result or {}).get("parsed", {}) or {})
+    has_primary = booking.get("_has_primary")
+    existing = booking.get("guests") or []
+    if has_primary:
+        # 已有 inline 入住者* 欄位 -> 把證件欄位補進第一位客人
+        g0 = existing[0] if existing else {}
+        for k in ("zh_name", "en_name", "doc_number", "dob"):
+            if pg.get(k) and not g0.get(k):
+                g0[k] = pg[k]
+        booking["guests"] = [g0] + existing[1:]
+    else:
+        # 無 inline 入住者 -> 證件即成為入住者；原獨立中文行轉為訂房人
+        if not booking.get("booker") and existing:
+            booking["booker"] = "、".join(
+                g.get("zh_name", "") for g in existing if g.get("zh_name")
+            )
+        booking["guests"] = [pg] if pg else existing
+    booking.pop("_has_primary", None)
     return booking
 
 
