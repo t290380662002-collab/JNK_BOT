@@ -50,6 +50,33 @@ KV_LABELS = [
 # 獨立行過濾：含這些字視為「指令/狀態」而非姓名（如「讀取證件完畢 回傳文字」）
 IGNORE_STANDALONE = ["讀取", "回傳", "完畢", "掃描", "證件", "完"]
 
+# 聊天記錄行（如 Telegram 匯出的「[2026/7/17 下午 04:44] 忠: 123」）直接略過，
+# 不應被當成訂房資料或客人姓名。
+_CHATLOG_RE = re.compile(r"^\s*\[\s*\d{4}[/-]\d{1,2}[/-]\d{1,2}")
+# 指令提示關鍵字（bot 的 /command 與說明文字）
+_CMD_HINT_RE = re.compile(r"(/book|/export|/list|/clear|/scan|/skip|/start|/help)")
+# 值中混入的「用戶指示/聊天」文字起點（出現即截斷）
+_NOISE_RE = re.compile(r"(\[|只讀取|無須讀取|普通聊天|正確格式|/book|/export|/list|/clear|/scan|/skip)")
+
+
+def _is_chatlog(line: str) -> bool:
+    """判斷是否為聊天記錄行（以 [YYYY/M/D ...] 開頭）。"""
+    return bool(_CHATLOG_RE.match(line or ""))
+
+
+def _clean_kv_value(value: str) -> str:
+    """截斷 KV 值中混入的聊天記錄 / 指令提示 / 用戶指示雜字，只留正確值。
+
+    例：「泰哥服務群 只讀取正確格式 普通聊天打字 無須讀取提示 [2026/7/17...] 忠: 123」
+        -> 「泰哥服務群」
+    """
+    if not value:
+        return value
+    m = _NOISE_RE.search(value)
+    if m:
+        value = value[:m.start()]
+    return value.strip()
+
 
 def _resolve_hotel(name):
     name = (name or "").strip().lower()
@@ -155,10 +182,13 @@ def parse(text: str) -> dict:
     standalone = []       # 非 KV 且含中文的獨立行（可能為訂房人 / 客人）
 
     for ln in lines:
+        # 聊天記錄行（[日期] 人名:）直接略過，不納入訂房解析
+        if _is_chatlog(ln):
+            continue
         m = re.match(r"^(.*?)[：:]\s*(.*)$", ln)
         if m:
             label = m.group(1).strip()
-            value = m.group(2).strip()
+            value = _clean_kv_value(m.group(2).strip())
             matched = None
             for kw in KV_LABELS:
                 if kw in label:
@@ -176,8 +206,13 @@ def parse(text: str) -> dict:
                     if prefix and re.search(r"[\u4e00-\u9fff]", prefix):
                         standalone.append(prefix)
                 continue
-        # 非 KV：含中文的獨立行
-        if re.search(r"[\u4e00-\u9fff]", ln) and not any(w in ln for w in IGNORE_STANDALONE):
+        # 非 KV：含中文的獨立行（略過聊天記錄/指令提示/普通聊天句子）
+        # 判定為「姓名」的條件：短、不含句讀標點（，。！？；），避免把聊天句子當客人
+        if (re.search(r"[\u4e00-\u9fff]", ln)
+                and not any(w in ln for w in IGNORE_STANDALONE)
+                and not _CMD_HINT_RE.search(ln)
+                and not re.search(r"[，。！？；、]", ln)
+                and len(ln) <= 12):
             standalone.append(ln)
 
     # 入住者優先成為客人；其餘獨立行視為訂房人（如「江-泰哥-呂布」）
