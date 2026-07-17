@@ -94,7 +94,7 @@ def _split_en_name(en: str):
 def _normalize_record(rec: dict) -> dict:
     b = {k: "" for k in ("surname", "firstname", "docnum", "dob",
                           "checkin", "checkout", "pax", "rooms",
-                          "zh", "en", "room", "smoking")}
+                          "zh", "en", "room", "smoking", "group", "agent")}
     parsed = rec.get("parsed")
     if parsed:
         b["surname"] = (parsed.get("last_name") or "").strip().upper()
@@ -142,6 +142,9 @@ def _normalize_record(rec: dict) -> dict:
             b["pax"] = manual["pax"]
         if manual.get("smoking") is not None:
             b["smoking"] = manual["smoking"]
+        # 群組/代理：文字訂房帶入清單表
+        b["group"] = manual.get("group") or manual.get("wechat") or ""
+        b["agent"] = manual.get("agent") or manual.get("booker") or ""
         # 房型依用戶指示不填 -> room 留空
     return b
 
@@ -166,6 +169,10 @@ def _bookings_from_manual(booking: dict) -> list:
             "room_count": booking.get("room_count"),
             "pax": booking.get("pax"),
             "smoking": booking.get("smoking"),
+            "wechat": booking.get("wechat"),
+            "booker": booking.get("booker"),
+            "group": booking.get("group"),
+            "agent": booking.get("agent"),
         }
         out.append(_normalize_record({"manual": m}))
     return out
@@ -327,14 +334,22 @@ def _nights(ci, co):
 def _fill_list_sheet(ws, cfg: dict, bookings: list):
     """填工作表1（10 欄訂房摘要表）：每位客人一列。
 
-    自動填：入住人 / 人數 / 入住日期 / 退房 / 晚數。
-    留空白手動補：群組 / 股東 / 代理 / 抵澳時間 / 離澳時間。
+    自動填：群組 / 代理 / 入住人 / 人數 / 入住日期 / 退房 / 晚數。
+    留空白手動補：股東 / 抵澳時間 / 離澳時間。
     """
     _clear_list_region(ws, cfg)
     start = cfg["list_start_row"]
     cols = cfg["list_cols"]
     for i, b in enumerate(bookings):
         row = start + i
+        # 群組（微信/群組）
+        group = b.get("group")
+        if group:
+            ws.cell(row=row, column=_col_to_idx(cols["group"]), value=group)
+        # 代理（訂房人/代理）
+        agent = b.get("agent")
+        if agent:
+            ws.cell(row=row, column=_col_to_idx(cols["agent"]), value=agent)
         # 入住人：中文姓名優先，否則英文
         guest = b.get("zh") or b.get("en") or ""
         if guest:
@@ -359,7 +374,7 @@ def _fill_list_sheet(ws, cfg: dict, bookings: list):
         n = _nights(ci, co)
         if n is not None:
             ws.cell(row=row, column=_col_to_idx(cols["nights"]), value=n)
-        # 群組/股東/代理/抵澳時間/離澳時間 -> 留空白手動補（使用者填）
+        # 股東 / 抵澳時間 / 離澳時間 -> 留空白手動補
 
 
 # ---------------------------------------------------------------------------

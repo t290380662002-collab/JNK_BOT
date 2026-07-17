@@ -43,8 +43,8 @@ KV_LABELS = [
     "入住者中文", "入住者英文", "出生年月日", "出生日期",
     "證件號碼", "證件",
     "飯店", "酒店", "入住", "退房", "房型", "件數", "房數", "人數",
-    "微信", "姓名", "名", "客人",
-    "是否吸煙", "吸煙", "抽煙", "煙",
+    "群組", "微信", "代理", "姓名", "名", "客人",
+    "是否吸煙", "是否吸菸", "吸煙", "吸菸", "抽煙", "抽菸", "煙", "菸",
 ]
 
 # 獨立行過濾：含這些字視為「指令/狀態」而非姓名（如「讀取證件完畢 回傳文字」）
@@ -116,12 +116,16 @@ def _apply_kv(booking, primary, label, value):
         booking["pax"] = _parse_int(value)
     elif label == "微信":
         booking["wechat"] = value
+    elif label == "群組":
+        booking["group"] = value
+    elif label == "代理":
+        booking["agent"] = value
     elif label in ("姓名", "名", "客人"):
         for p in re.split(r"[、，,]", value):
             p = p.strip().lstrip("-").strip()
             if p and re.search(r"[\u4e00-\u9fff]", p):
                 booking["guests"].append({"zh_name": p})
-    elif label in ("吸煙", "抽煙", "煙", "是否吸煙"):
+    elif label in ("吸煙", "吸菸", "抽煙", "抽菸", "煙", "菸", "是否吸煙", "是否吸菸"):
         booking["smoking"] = _parse_smoking(value) if value else _parse_smoking(label)
     elif label == "入住者中文":
         primary["zh_name"] = value
@@ -139,6 +143,8 @@ def parse(text: str) -> dict:
     booking = {
         "guests": [],
         "booker": None,
+        "agent": None,
+        "group": None,
         "check_in": None, "check_out": None,
         "room_type": None, "room_count": None, "pax": None,
         "smoking": None, "wechat": None, "hotel": None,

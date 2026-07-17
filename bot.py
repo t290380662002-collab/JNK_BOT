@@ -563,7 +563,9 @@ def _manual_summary(booking: dict, hotel_key: str) -> str:
         lines.append("ℹ️ 吸煙：未指定（如需標註請在文字輸入「吸菸/抽菸」或「禁煙」）")
 
     if booking.get("booker"):
-        lines.append(f"📇 訂房人：{booking['booker']}（本表無訂房人欄，僅作記錄）")
+        lines.append(f"📇 訂房人（代理）：{booking['booker']}（已填入清單表『代理』欄）")
+    if booking.get("wechat"):
+        lines.append(f"💬 群組：{booking['wechat']}（已填入清單表『群組』欄）")
     return "\n".join(lines)
 
 
