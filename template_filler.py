@@ -244,43 +244,40 @@ def _clean_special_label(s):
 
 
 def _fill_special_request(ws, lc, value, orig_label):
-    """特別要求：『特別要求 Special request：吸菸』顯示在「同一個」合併格內。
+    """特別要求：『特別要求 Special request：吸菸』顯示在「原本標籤合併格」內。
 
-    - 取消原標籤合併（如 L14:O14），改為把標籤格與右側輸入格合併成一格
-      （如 L14:P14…），整串文字放在標籤格，水平垂直置中。
-    - 文字基底一律取自原始模板標籤（orig_label），避免複製表累積上次的值。
+    - 保留模板原來的標籤合併範圍（如 L14:O14），不向右擴張到輸入格，避免超出原框。
+    - 把整串文字寫入標籤格左上角，開啟自動換行 + 縮小字型，並水平垂直置中，
+      讓文字能完整落在原框框內。
+    - 文字基底取自原始模板標籤（orig_label），避免複製表累積上次的值。
     """
     label_base = _clean_special_label(orig_label if orig_label else lc.value)
     full = f"{label_base}：{value}"
 
-    # 1) 取消原標籤合併，取得合併起點與原輸入格位置
+    # 1) 取得現有合併範圍；若原標籤未合併，則只與右側一格合併
     mr = _merged_range_of(ws, lc.row, lc.column)
     if mr:
-        ws.unmerge_cells(start_row=mr.min_row, start_column=mr.min_col,
-                         end_row=mr.max_row, end_column=mr.max_col)
-        start_col = mr.min_col
-        inp_col = mr.max_col + 1          # 原輸入格（標籤合併範圍右側第一格）
+        start_col, end_col = mr.min_col, mr.max_col
     else:
         start_col = lc.column
-        inp_col = lc.column + 1
+        end_col = min(lc.column + 1, 20)
+        ws.merge_cells(start_row=lc.row, start_column=start_col,
+                       end_row=lc.row, end_column=end_col)
 
-    # 2) 向右合併 3 格（原輸入格 + 右側空格），遇資料/合併格則停
-    end_col = inp_col
-    max_col = min(inp_col + 3, 20)
-    for c in range(inp_col + 1, max_col + 1):
-        cell = ws.cell(row=lc.row, column=c)
-        if cell.value is not None:
-            break
-        if _merged_range_of(ws, lc.row, c) is not None:
-            break
-        end_col = c
+    # 2) 清除右側原輸入格內容，避免舊值殘留
+    if mr:
+        for c in range(mr.max_col + 1, 21):
+            adj = ws.cell(row=lc.row, column=c)
+            if adj.value is not None:
+                adj.value = None
 
-    # 3) 合併成一格並寫入整串文字
-    ws.merge_cells(start_row=lc.row, start_column=start_col,
-                   end_row=lc.row, end_column=end_col)
+    # 3) 寫入整串文字並設定對齊/換行/縮小
     top = ws.cell(row=lc.row, column=start_col)
     top.value = full
-    top.alignment = Alignment(horizontal="center", vertical="center")
+    top.alignment = Alignment(
+        horizontal="center", vertical="center",
+        wrap_text=True, shrink_to_fit=True,
+    )
 
 
 def _fill_form_sheet(ws, b: dict, orig_special_label=None):
