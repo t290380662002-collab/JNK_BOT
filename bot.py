@@ -43,6 +43,7 @@ import excel_writer
 import hotel_templates as HT
 import template_filler
 import text_booking
+import validator
 
 load_dotenv()
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -117,13 +118,20 @@ def format_passport_text(r: dict) -> str:
     # 任何來源（MRZ 破折號 / OCR 可見文字的點號 / 中文年月日）都歸一化。
     dob = _norm_dob(dob)
     doc = p.get("doc_number") or "（未提供）"
-    return (
+    text = (
         "讀取證件完畢，回傳文字：\n"
         f"入住者中文：{zh}\n"
         f"入住者英文：{en}\n"
         f"出生年月日：{dob}\n"
         f"證件號碼：{doc}"
     )
+    # 資料核對：台灣姓名拼音 + 是否滿 21 歲
+    en_for_check = p.get("en_name") or (f"{last},{first}" if last and first else None)
+    warns = validator.validate_guest(zh if zh != "（未提供）" else None,
+                                     en_for_check, p.get("date_of_birth"))
+    if warns:
+        text += "\n\n⚠️ 資料核對提示：\n" + "\n".join("• " + w for w in warns)
+    return text
 
 
 def _fmt_ci(d):
@@ -172,6 +180,14 @@ def format_combined(booking: dict) -> str:
             line += f" 微信：{booking['wechat']}"
         lines.append("")
         lines.append(line)
+
+    # 資料核對：台灣姓名拼音 + 是否滿 21 歲
+    warns = validator.validate_guest(
+        g.get("zh_name"), g.get("en_name"), g.get("dob"))
+    if warns:
+        lines.append("")
+        lines.append("⚠️ 資料核對提示：")
+        lines.extend("• " + w for w in warns)
     return "\n".join(lines)
 
 
@@ -571,6 +587,14 @@ def _manual_summary(booking: dict, hotel_key: str) -> str:
         lines.append(f"📇 訂房人（代理）：{booking['booker']}（已填入清單表『代理』欄）")
     if booking.get("wechat"):
         lines.append(f"💬 群組：{booking['wechat']}（已填入清單表『群組』欄）")
+
+    # 資料核對：台灣姓名拼音 + 是否滿 21 歲
+    warns = validator.validate_guest(
+        g0.get("zh_name"), g0.get("en_name"), g0.get("dob"))
+    if warns:
+        lines.append("")
+        lines.append("⚠️ 資料核對提示：")
+        lines.extend("• " + w for w in warns)
     return "\n".join(lines)
 
 
