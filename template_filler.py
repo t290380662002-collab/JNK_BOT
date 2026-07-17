@@ -30,7 +30,7 @@ import tempfile
 from datetime import datetime, date
 
 import openpyxl
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, Border, Side
 
 import hotel_templates as HT
 
@@ -336,10 +336,27 @@ def _fill_list_sheet(ws, cfg: dict, bookings: list):
 
     自動填：群組 / 代理 / 入住人 / 人數 / 入住日期 / 退房 / 晚數。
     留空白手動補：股東 / 抵澳時間 / 離澳時間。
+    所有資料格統一畫上細框線並水平垂直置中。
     """
     _clear_list_region(ws, cfg)
     start = cfg["list_start_row"]
     cols = cfg["list_cols"]
+
+    # 統一樣式：細框線 + 水平垂直置中
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center")
+
+    # 先給整個填表區域（A~J 的資料列）畫上框線、置中
+    col_idx = [_col_to_idx(v) for v in cols.values()]
+    min_col, max_col = min(col_idx), max(col_idx)
+    for i in range(len(bookings)):
+        row = start + i
+        for c in range(min_col, max_col + 1):
+            cell = ws.cell(row=row, column=c)
+            cell.border = border
+            cell.alignment = center
+
     for i, b in enumerate(bookings):
         row = start + i
         # 群組（微信/群組）
@@ -374,7 +391,7 @@ def _fill_list_sheet(ws, cfg: dict, bookings: list):
         n = _nights(ci, co)
         if n is not None:
             ws.cell(row=row, column=_col_to_idx(cols["nights"]), value=n)
-        # 股東 / 抵澳時間 / 離澳時間 -> 留空白手動補
+        # 股東 / 抵澳時間 / 離澳時間 -> 留空白手動補（但框線/置中已套好）
 
 
 # ---------------------------------------------------------------------------
