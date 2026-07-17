@@ -10,6 +10,7 @@ import os
 import re
 import uuid
 from datetime import datetime
+from timeutil import taipei_now
 
 from aiohttp import web
 from dotenv import load_dotenv
@@ -140,7 +141,7 @@ def _fmt_ci(d):
         return "?"
     try:
         y, m, day = str(d).split("-")
-        if int(y) == datetime.now().year:
+        if int(y) == taipei_now().year:
             return f"{int(m)}/{int(day)}"
         return f"{y}/{int(m)}/{int(day)}"
     except Exception:
@@ -219,7 +220,7 @@ async def _produce_combined(chat_id, context, update, booking, note=""):
         booking["guests"] = [{}]
     try:
         path = await asyncio.to_thread(template_filler.fill_manual, hotel_key, booking)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = taipei_now().strftime("%Y%m%d_%H%M%S")
         zh = HT.HOTELS[hotel_key]["name"].split(" ")[0]
         # 檔名改用入住人中文姓名（無中文則英文，再無則「未提供姓名」）；
         # 過濾 Windows 檔名非法字元並限制長度。
@@ -424,7 +425,7 @@ async def type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     rec["doc_type"] = dtype
-    rec["scan_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rec["scan_time"] = taipei_now().strftime("%Y-%m-%d %H:%M:%S")
     sess["records"].append(rec)
     await q.edit_message_text(
         q.message.text.split("\n\n請選擇")[0]
@@ -493,7 +494,7 @@ async def hotel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fname = os.path.basename(path)
         else:
             path = await asyncio.to_thread(template_filler.fill, key, sess["records"])
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ts = taipei_now().strftime("%Y%m%d_%H%M%S")
             zh = HT.HOTELS[key]["name"].split(" ")[0]
             fname = f"{zh}_{ts}.xlsx"
     except Exception as e:  # noqa: BLE001
@@ -691,7 +692,7 @@ async def _do_fill_manual(chat_id, context, hotel_key, booking, update):
         await msg.reply_text(f"⏳ 正在產生「{label.split(' ')[0]}」訂房單…")
     try:
         path = await asyncio.to_thread(template_filler.fill_manual, hotel_key, booking)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = taipei_now().strftime("%Y%m%d_%H%M%S")
         zh = label.split(" ")[0]
         fname = f"{zh}_文字_{ts}.xlsx"
     except Exception as e:  # noqa: BLE001

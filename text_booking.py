@@ -28,6 +28,8 @@
 import re
 from datetime import datetime
 
+from timeutil import taipei_now
+
 HOTEL_ALIASES = {
     "倫敦人": "londoner", "伦敦人": "londoner", "londoner": "londoner",
     "威尼斯": "venetian", "威尼斯人": "venetian", "venetian": "venetian",
@@ -106,7 +108,7 @@ def _parse_date(s):
         return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
     m = re.search(r"(\d{1,2})[月/\-.](\d{1,2})", s)
     if m:
-        y = datetime.now().year
+        y = taipei_now().year
         return f"{y:04d}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
     return None
 

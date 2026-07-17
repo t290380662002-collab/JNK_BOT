@@ -33,6 +33,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Side
 
 import hotel_templates as HT
+from timeutil import taipei_now
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +57,7 @@ def _date_value(s):
         try:
             d = datetime.strptime(s, fmt)
             if fmt == "%m-%d":
-                d = d.replace(year=datetime.now().year)
+                d = d.replace(year=taipei_now().year)
             return d
         except ValueError:
             continue
@@ -298,7 +299,7 @@ def _fill_form_sheet(ws, b: dict, orig_special_label=None):
         "pax": b.get("pax", ""),
         "rooms": b.get("rooms", ""),
         "special_request": special,
-        "date": datetime.now().date(),
+        "date": taipei_now().date(),
     }
     for field, subs in HT.FORM_LABELS.items():
         if field == "date":
@@ -454,7 +455,7 @@ def _render(cfg: dict, bookings: list) -> str:
             _fill_form_sheet(new_ws, b, _orig_special)
             new_ws.title = _safe_sheet_title(form_name, idx, b.get("surname", ""))
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = taipei_now().strftime("%Y%m%d_%H%M%S")
     out_name = f"{cfg.get('key', 'booking')}_{ts}.xlsx"
     out_path = os.path.join(tempfile.gettempdir(), out_name)
     wb.save(out_path)

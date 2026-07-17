@@ -13,6 +13,7 @@ import tempfile
 from datetime import datetime
 
 from openpyxl import Workbook
+from timeutil import taipei_now
 from openpyxl.styles import Alignment, Font, PatternFill
 
 # (record 層級 key 或 parsed 層級 key, 中文欄位名)
@@ -68,7 +69,7 @@ def build(records: list, path: str | None = None) -> str:
     ws.freeze_panes = "A2"
 
     if path is None:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = taipei_now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(tempfile.gettempdir(), f"docscan_{ts}.xlsx")
 
     wb.save(path)
