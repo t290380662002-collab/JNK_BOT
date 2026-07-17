@@ -77,11 +77,30 @@ def parse(mrz_lines):
         line2 = next((l for l in longs if l != line1), longs[1])
         return _parse_td3(line1, line2)
 
-    # 單行 TD3 第二行：OCR 常把兩行機讀區打散，只剩第二行。
-    # 第二行仍含 證件號/國籍/生日/性別/效期，足以可靠抽取
-    # （姓名在第一行故缺，改由 OCR 文字補）。
-    if longs and "<" in longs[0]:
-        return _parse_td3_line2(longs[0])
+    # TD3（容錯）：OCR 偶爾漏掉機讀區尾部的填充 '<'，使兩行都 < 40 字。
+    # 護照 TD3 第一行必定以 'P' 開頭（TD1 卡式證件以 I/A/C 開頭，須排除，
+    # 否則會被誤判成 TD3 第一行而解析錯亂）。只要存在這樣的候選行，
+    # 且另有一條候選行（第二行），即可還原英文姓名。
+    name_lines = [l for l in candidates if l and l[0] == "P" and "<<" in l]
+    if name_lines and len(candidates) >= 2:
+        line1 = name_lines[0]
+        line2 = next((l for l in candidates if l != line1), line1)
+        return _parse_td3(line1, line2)
+
+    # 單行：需判斷是 TD3 第一行（含英文姓名）還是第二行（證件號/生日）。
+    # 第一行以 P/V/A/C/I 開頭，姓名在位置 5 之後；第二行以數字或國碼開頭。
+    if longs:
+        l0 = longs[0]
+        if l0[0] in "PVACI":
+            last, first = _split_names(l0[5:])
+            if last:
+                return {
+                    "doc_type_guess": "護照(單行MRZ)",
+                    "last_name": last,
+                    "first_name": first,
+                }
+        if "<" in l0:
+            return _parse_td3_line2(l0)
 
     # TD1：含 '<' 且長度 >= 18 的候選行取最長三條
     mrz_like = [l for l in candidates if "<" in l and len(l) >= 18]

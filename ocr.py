@@ -124,14 +124,85 @@ def _extract_mrz_lines(text: str) -> list:
     return lines
 
 
+def _reconstruct_mrz_lines(text: str) -> list:
+    """OCR 常把機讀區整行拆成多段/多行（尤其第一行含英文姓名那行）。
+    把所有『純 MRZ 字元（A-Z0-9<）』片段拼成一段，再以可靠特徵重組 TD3 兩行：
+
+    關鍵：以「9 位數字 + '<'」錨定第二行（證件號碼，OCR 極少讀錯），
+    其前方 44 字即第一行（含英文姓名）。這比固定寬度滑窗穩健——
+    即使第一行被拆成數段、各段長度不一，也能正確對齊。
+
+    例：OCR 把 'P<TWN<GU<<' 與 'FONG-ZHI<<<...' 拆成兩行 -> 拼回成
+        完整的 'P<TWN<GU<<FONG-ZHI<<...'（44 字）讓解析器取回英文姓名。
+    """
+    frags = []
+    for raw in text.splitlines():
+        c = re.sub(r"[^A-Z0-9<]", "", raw.upper())
+        if "<" in c and len(c) >= 10:
+            frags.append(c)
+    if not frags:
+        return []
+    blob = "".join(frags)
+
+    # 1) 以證件號碼（9 位數字後接 '<'）錨定第二行起點；
+    #    其前方（不足 44 字則從 0 起）即第一行。
+    m2 = re.search(r"\d{9}<", blob)
+    if m2:
+        i2 = m2.start()
+        i1 = max(0, i2 - 44)
+        w1 = blob[i1:i2]
+        w2 = blob[i2:i2 + 44]
+        if w1 and w1[0] in "PVACI" and w1.count("<") >= 1 and w2.count("<") >= 1:
+            return [w1, w2]
+
+    # 2) 退化：滑動 44 字視窗找「以 P/V/A/C/I 開頭」的 line1，其後接 line2
+    best: list = []
+    for i in range(0, len(blob) - 43):
+        w1 = blob[i:i + 44]
+        if w1[0] not in "PVACI" or w1.count("<") < 1:
+            continue
+        rest = blob[i + 44:]
+        if len(rest) >= 30:
+            w2 = rest[:44]
+            if (w2[0].isdigit() or w2[0] in "PVACI") and w2.count("<") >= 1:
+                best = [w1, w2]
+                break
+    if best:
+        return best
+
+    # 3) 只找到一行（TD3 第二行或 TD1 行）
+    for i in range(0, len(blob) - 29):
+        w = blob[i:i + 30]
+        if w[0] in "PVACI" and w.count("<") >= 1:
+            return [w]
+    return []
+
+
 def _parse_from_free_text(text: str) -> dict | None:
     """全頁文字的兜底解析：先找 MRZ 行（含單行第二行），再嘗試 regex 撈證件號碼。
 
     若 MRZ 只剩第二行（護照常見），會再從可見文字補上英文姓名，避免只回傳 doc/dob。
+    OCR 把機讀區拆段時，先嘗試 _reconstruct_mrz_lines 拼回完整行。
     """
     lines = _extract_mrz_lines(text)
+    if len(lines) < 2:
+        rec = _reconstruct_mrz_lines(text)
+        if rec:
+            lines = rec
     if lines:
         parsed = mrz_parser.parse(lines)
+        # 標準抽取沒拿到姓名時，再試一次拼回 MRZ 重解（OCR 把第一行拆段時常見）
+        if not (parsed and (parsed.get("last_name") or parsed.get("en_name"))):
+            rec = _reconstruct_mrz_lines(text)
+            if rec and rec != lines:
+                rp = mrz_parser.parse(rec)
+                if rp and (rp.get("last_name") or rp.get("en_name")):
+                    if parsed is None:
+                        parsed = rp
+                    else:
+                        for k in ("zh_name", "en_name", "last_name", "first_name"):
+                            if rp.get(k) and not parsed.get(k):
+                                parsed[k] = rp[k]
         # 即使 parser 回傳單行 MRZ（只有 doc/dob，缺姓名），也從可見文字補姓名
         if parsed and not (parsed.get("last_name") or parsed.get("en_name")):
             cf = _extract_chinese_fields(text)
@@ -307,9 +378,9 @@ def _extract_chinese_fields(text: str) -> dict | None:
 
     # 4) 最後退路：全局找孤立的中英文姓名對（適合版面乾淨的護照）
     if not zh_name and not en_name:
-        # 找 "中文名\n英文名" 或 "中文名 英文名" 的組合
+        # 雙向：'中文名 英文名' 或 '英文名 中文名'（含換行/同行的各種排列）
         m = re.search(
-            r"([\u4e00-\u9fff]{2,4})\s*\n?\s*([A-Z]{2,}(?:[,，\s\-][A-Z]+)+)",
+            r"([\u4e00-\u9fff]{2,4})\s*[\n]?\s*([A-Z]{2,}(?:[,，\s\-][A-Z]+)+)",
             text,
         )
         if m:
@@ -319,11 +390,37 @@ def _extract_chinese_fields(text: str) -> dict | None:
                 last_name, first_name = pair
                 en_name = f"{last_name},{first_name}"
                 res["zh_name"] = zh_name
+        else:
+            m = re.search(
+                r"([A-Z]{2,}(?:[,，\s\-][A-Z]+)+)\s*[\n]?\s*([\u4e00-\u9fff]{2,4})",
+                text,
+            )
+            if m:
+                pair = _extract_en_name(m.group(1))
+                if pair:
+                    last_name, first_name = pair
+                    en_name = f"{last_name},{first_name}"
+                    zh_name = m.group(2)
+                    res["zh_name"] = zh_name
 
     if en_name:
         res["en_name"] = en_name
         res["last_name"] = last_name
         res["first_name"] = first_name
+
+    # 5) 最後退路：OCR 把 MRZ 第一行（含英文姓名）當純文字帶回時，
+    #    用拼回邏輯還原 TD3 機讀行並從第一行取回姓/名。
+    if not en_name:
+        rec = _reconstruct_mrz_lines(text)
+        if len(rec) >= 1:
+            mp = mrz_parser.parse(rec)
+            if mp and mp.get("last_name"):
+                last_name = mp["last_name"]
+                first_name = mp.get("first_name", "")
+                en_name = f"{last_name},{first_name}"
+                res["en_name"] = en_name
+                res["last_name"] = last_name
+                res["first_name"] = first_name
 
     # -----------------------------------------------------------------------
     # 出生日期：支援 1981.07.08 / 1981年07月08日 / 1981-07-08 / 05 AUG 1989
@@ -625,7 +722,14 @@ def _downscale_if_large(image_bytes: bytes, max_bytes: int = 900_000) -> bytes:
 
 
 def _ocrspace_ocr(image_bytes: bytes) -> str:
-    """OCR.space 免費 API（免綁卡）：支援繁體中文 cht + 英文，對拍攝照片辨識率佳。"""
+    """OCR.space 免費 API（免綁卡）。
+
+    改用「雙語雙引擎」策略以最大化姓名擷取率：
+      - eng + Engine1：MRZ 機讀區與英文姓名是純英文印刷體，Engine1 對印刷體最準，
+        能穩定讀出 MRZ 第一行（含英文姓名 GU<<FONG-ZHI）與第二行（證件號/生日）。
+      - cht + Engine2：負責繁體中文姓名（古豐誌）與中文欄位標籤。
+    兩次結果拼接後回傳，後續抽取邏輯各取所需。
+    """
     import requests
 
     key = os.environ.get("OCR_SPACE_KEY")
@@ -634,26 +738,31 @@ def _ocrspace_ocr(image_bytes: bytes) -> str:
     url = "https://api.ocr.space/parse/image"
     # 免費方案單檔 ≤1MB；過大先縮小
     payload = image_bytes if len(image_bytes) <= 900_000 else _downscale_if_large(image_bytes)
-    try:
-        r = requests.post(
-            url,
-            data={
-                "apikey": key,
-                "language": "cht",      # 繁體中文（含英文識別）
-                "isOverlayRequired": "false",
-                "scale": "true",        # 自動放大低 DPI 內容
-                "OCREngine": "2",       # Engine2 支援語言自動偵測、特殊字元
-            },
-            files={"image": ("id.jpg", payload, "image/jpeg")},
-            timeout=25,
-        )
-        r.raise_for_status()
-        j = r.json()
-        if j.get("IsErroredOnProcessing"):
-            logger.warning("OCR.space 處理錯誤：%s", j.get("ErrorMessage"))
-            return ""
-        texts = [p.get("ParsedText", "") for p in j.get("ParsedResults", [])]
-        return "\n".join(texts)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("OCR.space 例外：%s", e)
-        return ""
+    texts = []
+    # (語言, 引擎)：英文跑 MRZ/英文姓名，繁中跑中文姓名
+    for lang, engine in (("eng", "1"), ("cht", "2")):
+        try:
+            r = requests.post(
+                url,
+                data={
+                    "apikey": key,
+                    "language": lang,
+                    "isOverlayRequired": "false",
+                    "scale": "true",        # 自動放大低 DPI 內容
+                    "OCREngine": engine,
+                },
+                files={"image": ("id.jpg", payload, "image/jpeg")},
+                timeout=25,
+            )
+            r.raise_for_status()
+            j = r.json()
+            if j.get("IsErroredOnProcessing"):
+                logger.warning("OCR.space(%s) 處理錯誤：%s", lang, j.get("ErrorMessage"))
+                continue
+            for p in j.get("ParsedResults", []):
+                t = p.get("ParsedText", "")
+                if t:
+                    texts.append(t)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("OCR.space(%s) 例外：%s", lang, e)
+    return "\n".join(texts)
