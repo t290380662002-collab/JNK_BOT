@@ -277,32 +277,50 @@ def _clear_list_region(ws, cfg: dict, rows: int = 60):
             cell.value = None
 
 
+def _nights(ci, co):
+    """晚數 = 退房 - 入住（天）。兩者皆為日期才計算。"""
+    if isinstance(ci, datetime) and isinstance(co, datetime):
+        d = (co - ci).days
+        return d if d >= 0 else None
+    return None
+
+
 def _fill_list_sheet(ws, cfg: dict, bookings: list):
+    """填工作表1（10 欄訂房摘要表）：每位客人一列。
+
+    自動填：入住人 / 人數 / 入住日期 / 退房 / 晚數。
+    留空白手動補：群組 / 股東 / 代理 / 抵澳時間 / 離澳時間。
+    """
     _clear_list_region(ws, cfg)
     start = cfg["list_start_row"]
     cols = cfg["list_cols"]
     for i, b in enumerate(bookings):
         row = start + i
-        if "zh" in cols and b.get("zh"):
-            ws.cell(row=row, column=_col_to_idx(cols["zh"]), value=b["zh"])
-        if "en" in cols and b.get("en"):
-            ws.cell(row=row, column=_col_to_idx(cols["en"]), value=b["en"])
-        if "doc" in cols and b.get("docnum"):
-            ws.cell(row=row, column=_col_to_idx(cols["doc"]), value=b["docnum"])
-        if "dob" in cols and b.get("dob") not in ("", None):
-            c = ws.cell(row=row, column=_col_to_idx(cols["dob"]), value=b["dob"])
-            if isinstance(b["dob"], datetime):
-                c.number_format = _DOB_FMT
-        # room（房型）：依用戶指示不填，留空手動補
-    # 吸煙欄（僅名匯清單表有）
-    scol = cfg.get("list_smoking_col")
-    if scol:
-        sidx = _col_to_idx(scol)
-        for i, b in enumerate(bookings):
-            if b.get("smoking") is None:
-                continue
-            ws.cell(row=start + i, column=sidx,
-                    value="吸菸" if b["smoking"] else "禁煙")
+        # 入住人：中文姓名優先，否則英文
+        guest = b.get("zh") or b.get("en") or ""
+        if guest:
+            ws.cell(row=row, column=_col_to_idx(cols["guest"]), value=guest)
+        # 人數（整筆訂房共用）
+        pax = b.get("pax")
+        if pax not in ("", None):
+            ws.cell(row=row, column=_col_to_idx(cols["pax"]), value=pax)
+        # 入住日期
+        ci = b.get("checkin")
+        if ci not in ("", None):
+            c = ws.cell(row=row, column=_col_to_idx(cols["checkin"]), value=ci)
+            if isinstance(ci, datetime):
+                c.number_format = _CHECK_FMT
+        # 退房
+        co = b.get("checkout")
+        if co not in ("", None):
+            c = ws.cell(row=row, column=_col_to_idx(cols["checkout"]), value=co)
+            if isinstance(co, datetime):
+                c.number_format = _CHECK_FMT
+        # 晚數
+        n = _nights(ci, co)
+        if n is not None:
+            ws.cell(row=row, column=_col_to_idx(cols["nights"]), value=n)
+        # 群組/股東/代理/抵澳時間/離澳時間 -> 留空白手動補（使用者填）
 
 
 # ---------------------------------------------------------------------------

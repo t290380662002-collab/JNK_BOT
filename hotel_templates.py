@@ -34,26 +34,34 @@ FORM_LABELS = {
     "special_request": ["特別要求", "Special request"],
 }
 
+# 工作表1（清單表）統一為 10 欄「訂房摘要表」。
+# 欄位順序固定：群組/股東/代理/入住人/人數/入住日期/抵澳時間/退房/離澳時間/晚數
+# （A~J）。群組/股東/代理/抵澳時間/離澳時間 由使用者手動補；
+# 入住人/人數/入住日期/退房/晚數 由 bot 自動填入。
+SUMMARY_COLS = {
+    "group": "A", "shareholder": "B", "agent": "C", "guest": "D",
+    "pax": "E", "checkin": "F", "arrival": "G", "checkout": "H",
+    "departure": "I", "nights": "J",
+}
+
 HOTELS = {
     "mingqui": {
         "name": "名匯 (Londoner Grand)",
         "file": "mingqui.xlsx",
         "form_sheet": "Londoner Grand",
         "list_sheet": "Sheet1",
-        "list_header_row": 8,
-        "list_start_row": 9,
-        "list_cols": {"zh": "G", "en": "H", "doc": "I", "dob": "J", "room": "K"},
-        "list_smoking_col": "L",  # 僅名匯清單表有吸煙欄
+        "list_header_row": 1,
+        "list_start_row": 2,
+        "list_cols": SUMMARY_COLS,
     },
     "venetian": {
         "name": "威尼斯 (Venetian)",
         "file": "venetian.xlsx",
         "form_sheet": "Venetian",
         "list_sheet": "工作表1",
-        "list_header_row": 2,
-        "list_start_row": 3,
-        "list_cols": {"zh": "C", "en": "D", "doc": "E", "dob": "F", "room": "G"},
-        "list_smoking_col": None,
+        "list_header_row": 1,
+        "list_start_row": 2,
+        "list_cols": SUMMARY_COLS,
     },
     "parisian": {
         "name": "巴黎人 (Parisian)",
@@ -62,19 +70,16 @@ HOTELS = {
         "list_sheet": "Sheet1",
         "list_header_row": 1,
         "list_start_row": 2,
-        # 注意：巴黎人 出生日期(C) 與 證件號碼(D) 順序與其他酒店相反
-        "list_cols": {"zh": "A", "en": "B", "dob": "C", "doc": "D", "room": "E"},
-        "list_smoking_col": None,
+        "list_cols": SUMMARY_COLS,
     },
     "londoner": {
         "name": "倫敦人 (Londoner)",
         "file": "londoner.xlsx",
         "form_sheet": "Londoner",
         "list_sheet": "工作表1",
-        "list_header_row": 2,
-        "list_start_row": 3,
-        "list_cols": {"zh": "B", "en": "C", "doc": "D", "dob": "E", "room": "F"},
-        "list_smoking_col": None,
+        "list_header_row": 1,
+        "list_start_row": 2,
+        "list_cols": SUMMARY_COLS,
     },
     "yuyuan": {
         "name": "御園 (Londoner Court)",
@@ -82,10 +87,8 @@ HOTELS = {
         "form_sheet": "Londoner Court",
         "list_sheet": "Sheet1",
         "list_header_row": 1,
-        "list_start_row": 3,  # 第2列空白，資料從第3列起
-        # 御園清單表無「房型」欄
-        "list_cols": {"zh": "A", "en": "B", "doc": "C", "dob": "D"},
-        "list_smoking_col": None,
+        "list_start_row": 2,
+        "list_cols": SUMMARY_COLS,
     },
     "conrad": {
         "name": "康萊德 (Conrad)",
