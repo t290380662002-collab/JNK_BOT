@@ -3,7 +3,8 @@
 護照資料自動核對：台灣姓名拼音 + 年齡是否滿 21 歲。
 
 用途：掃描證件或 /book 手打資料後，自動判斷
-  1) 英文姓名拼音（台灣威妥瑪/國語羅馬字第二式）與中文姓名是否吻合；
+  1) 英文姓名拼音（台灣護照拼法：威妥瑪/通用拼音，如 CHIA）與中文姓名是否吻合；
+     注意：此為台灣護照拼音，與大陸漢語拼音（如 jia）不同，請勿混淆。
   2) 出生日期推算是否滿 21 歲。
 若有疑慮（拼音可能拼錯 / 未滿 21 歲）回傳提示清單，供 bot 顯示警告。
 
@@ -133,7 +134,7 @@ def validate_name(zh: str, en: str):
     sp = _char_pinyin(z_sur)
     if sp and e_sur and e_sur not in sp:
         warns.append(
-            f"姓「{z_sur}」的拼音可能不是 {e_sur}（一般為 {'/'.join(sp)}）"
+            f"姓「{z_sur}」的拼音可能不是 {e_sur}（台灣護照拼法為 {'/'.join(sp)}，與大陸漢語拼音不同）"
         )
 
     # 名：逐字對逐段
@@ -143,7 +144,7 @@ def validate_name(zh: str, en: str):
         gp = _char_pinyin(ch)
         if gp and seg and seg not in gp:
             warns.append(
-                f"名字「{ch}」的拼音可能不是 {seg}（一般為 {'/'.join(gp)}）"
+                f"名字「{ch}」的拼音可能不是 {seg}（台灣護照拼法為 {'/'.join(gp)}，與大陸漢語拼音不同）"
             )
     return warns
 

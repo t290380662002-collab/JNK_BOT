@@ -130,7 +130,7 @@ def format_passport_text(r: dict) -> str:
     warns = validator.validate_guest(zh if zh != "（未提供）" else None,
                                      en_for_check, p.get("date_of_birth"))
     if warns:
-        text += "\n\n⚠️ 資料核對提示：\n" + "\n".join("• " + w for w in warns)
+        text += "\n\n⚠️ 資料核對提示（台灣護照拼音，非大陸漢語拼音）：\n" + "\n".join("• " + w for w in warns)
     return text
 
 
@@ -186,7 +186,7 @@ def format_combined(booking: dict) -> str:
         g.get("zh_name"), g.get("en_name"), g.get("dob"))
     if warns:
         lines.append("")
-        lines.append("⚠️ 資料核對提示：")
+        lines.append("⚠️ 資料核對提示（台灣護照拼音，非大陸漢語拼音）：")
         lines.extend("• " + w for w in warns)
     return "\n".join(lines)
 
@@ -606,7 +606,7 @@ def _manual_summary(booking: dict, hotel_key: str) -> str:
         g0.get("zh_name"), g0.get("en_name"), g0.get("dob"))
     if warns:
         lines.append("")
-        lines.append("⚠️ 資料核對提示：")
+        lines.append("⚠️ 資料核對提示（台灣護照拼音，非大陸漢語拼音）：")
         lines.extend("• " + w for w in warns)
     return "\n".join(lines)
 
