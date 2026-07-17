@@ -40,9 +40,9 @@ HOTEL_ALIASES = {
 # key-value 標籤（順序：越具體越前，避免被短關鍵字搶先匹配，
 # 例如 "入住" 是 "入住者中文" 的前綴，必須讓具體標籤排前面）
 KV_LABELS = [
-    "入住者中文", "入住者英文", "出生年月日", "出生日期",
+    "入住者中文", "入住者英文", "入住者名", "出生年月日", "出生日期",
     "證件號碼", "證件",
-    "飯店", "酒店", "入住", "退房", "房型", "件數", "房數", "人數",
+    "飯店", "酒店", "入住", "退房", "房型", "件數", "房數", "間數", "人數",
     "群組", "微信", "代理", "姓名", "名", "客人",
     "是否吸煙", "是否吸菸", "吸煙", "吸菸", "抽煙", "抽菸", "煙", "菸",
 ]
@@ -123,6 +123,9 @@ def _parse_smoking(s):
     if not s:
         return None
     s = s.strip()
+    # 明確否定詞：否 / 無 / 不 / 沒有 -> 禁煙
+    if s in ("否", "無", "无", "不", "沒有", "没有", "沒", "非"):
+        return False
     if any(k in s for k in ("禁煙", "不抽", "無煙", "无烟", "不吸")):
         return False
     if any(k in s for k in ("抽煙", "吸菸", "吸煙", "吸咽", "抽", "煙", "烟", "菸")):
@@ -145,7 +148,7 @@ def _apply_kv(booking, primary, label, value):
         booking["check_out"] = _parse_date(value)
     elif label == "房型":
         booking["room_type"] = value
-    elif label in ("件數", "房數"):
+    elif label in ("件數", "房數", "間數"):
         booking["room_count"] = _parse_int(value)
     elif label == "人數":
         booking["pax"] = _parse_int(value)
@@ -166,6 +169,9 @@ def _apply_kv(booking, primary, label, value):
         primary["zh_name"] = value
     elif label == "入住者英文":
         primary["en_name"] = value
+    elif label == "入住者名":
+        # 備註性文字（如「一間一位一本證件」），不納入任何欄位
+        pass
     elif label in ("出生年月日", "出生日期"):
         primary["dob"] = _parse_date(value)
     elif label in ("證件號碼", "證件"):
@@ -197,11 +203,14 @@ def parse(text: str) -> dict:
         if m:
             label = m.group(1).strip()
             value = _clean_kv_value(m.group(2).strip())
+            # 選「最長」匹配的關鍵字：避免「入住者名」被較短的「入住」搶先誤判
+            # 為入住日期（最長匹配才能讓「入住者名」>「入住」優先）。
             matched = None
+            best_len = -1
             for kw in KV_LABELS:
-                if kw in label:
+                if kw in label and len(kw) > best_len:
                     matched = kw
-                    break
+                    best_len = len(kw)
             if matched:
                 _apply_kv(booking, primary, matched, value)
                 if matched in ("入住者中文", "入住者英文", "出生年月日", "出生日期",
