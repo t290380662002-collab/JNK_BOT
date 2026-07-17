@@ -641,10 +641,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📸 請傳送客人的「證件照片」完成掃描，或輸入 /skip 跳過證件直接產單。"
         )
         return
+    # 不像訂房的內容（純聊天 / 閒聊 / 雜訊）-> 靜默不回應，
+    # 不再顯示「請傳送證件…」提示，避免打擾。
     if not _looks_like_booking(text):
-        await update.message.reply_text(
-            "請傳送證件『照片』，或用 /book 文字下訂、/export、/list、/clear 指令。"
-        )
         return
     booking = text_booking.parse(text)
     if not booking.get("hotel"):
