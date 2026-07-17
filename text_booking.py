@@ -57,6 +57,14 @@ _CHATLOG_RE = re.compile(r"^\s*\[\s*\d{4}[/-]\d{1,2}[/-]\d{1,2}")
 _CMD_HINT_RE = re.compile(r"(/book|/export|/list|/clear|/scan|/skip|/start|/help)")
 # 值中混入的「用戶指示/聊天」文字起點（出現即截斷）
 _NOISE_RE = re.compile(r"(\[|只讀取|無須讀取|普通聊天|正確格式|/book|/export|/list|/clear|/scan|/skip)")
+# 聊天發言者行：冒號前不是已知關鍵字，且形如「發言者：訊息」-> 視為聊天整行略過。
+# 例：「忠: 新增一些東西」「Jnk: 請傳送證件…」「客: 好的」「A: 收到」
+_SPEAKER_RE = re.compile(r"^\s*[^：:]{1,12}\s*[：:]\s*\S")
+# 獨立行若含這些聊天動詞/字，必非姓名，略過（避免把聊天句子當客人）
+_CHAT_VERB_RE = re.compile(
+    r"(新增|請|傳送|指令|提示|聊天|普通|格式|用|讓|幫|這|那|好|在|是|的|了|嗎|吧|啊|"
+    r"東西|一些|什麼|什麽|今天|明天|昨天|收到|好的|好喔|謝|麻煩|麻烦)"
+)
 
 
 def _is_chatlog(line: str) -> bool:
@@ -206,12 +214,18 @@ def parse(text: str) -> dict:
                     if prefix and re.search(r"[\u4e00-\u9fff]", prefix):
                         standalone.append(prefix)
                 continue
-        # 非 KV：含中文的獨立行（略過聊天記錄/指令提示/普通聊天句子）
-        # 判定為「姓名」的條件：短、不含句讀標點（，。！？；），避免把聊天句子當客人
+            # 非關鍵字冒號行（如「忠: 新增一些東西」「Jnk: 請傳送證件…」）
+            # 這是聊天軟體的「發言者：訊息」格式，整行略過，不當資料/姓名。
+            if _SPEAKER_RE.match(ln):
+                continue
+        # 非 KV 獨立行：僅接受「像是姓名」的中文短行，其餘（聊天/指令）略過。
+        # 判定為姓名：含中文、不含已知指令/聊天動詞/標點/英文、長度適中。
         if (re.search(r"[\u4e00-\u9fff]", ln)
                 and not any(w in ln for w in IGNORE_STANDALONE)
                 and not _CMD_HINT_RE.search(ln)
-                and not re.search(r"[，。！？；、]", ln)
+                and not _CHAT_VERB_RE.search(ln)
+                and not re.search(r"[，。！？；、：:]", ln)
+                and not re.search(r"[A-Za-z]", ln)
                 and len(ln) <= 12):
             standalone.append(ln)
 
