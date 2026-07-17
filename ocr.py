@@ -125,39 +125,68 @@ def _extract_mrz_lines(text: str) -> list:
 
 
 def _parse_from_free_text(text: str) -> dict | None:
-    """全頁文字的兜底解析：先找 MRZ 行（含單行第二行），再嘗試 regex 撈證件號碼。"""
+    """全頁文字的兜底解析：先找 MRZ 行（含單行第二行），再嘗試 regex 撈證件號碼。
+
+    若 MRZ 只剩第二行（護照常見），會再從可見文字補上英文姓名，避免只回傳 doc/dob。
+    """
     lines = _extract_mrz_lines(text)
     if lines:
         parsed = mrz_parser.parse(lines)
+        # 即使 parser 回傳單行 MRZ（只有 doc/dob，缺姓名），也從可見文字補姓名
+        if parsed and not (parsed.get("last_name") or parsed.get("en_name")):
+            cf = _extract_chinese_fields(text)
+            if cf:
+                for k in ("zh_name", "en_name", "last_name", "first_name"):
+                    if cf.get(k):
+                        parsed[k] = cf[k]
         if parsed:
+            return parsed
+        # 單行 MRZ 第二行：有 doc/dob，但缺姓名 -> 從可見文字補姓名
+        if len(lines) == 1 and len(lines[0]) >= 40:
+            parsed = mrz_parser._parse_td3_line2(lines[0])
+            cf = _extract_chinese_fields(text)
+            if cf:
+                for k in ("zh_name", "en_name", "last_name", "first_name"):
+                    if cf.get(k):
+                        parsed[k] = cf[k]
             return parsed
     m = re.search(
         r"(?:PASSPORT|護照|NO\.?|號碼|DOC(?:UMENT)?\s*NO)[\s:]*([A-Z]{1,3}[0-9]{6,9})",
         text, re.I,
     )
     if m:
-        return {"doc_number": m.group(1), "doc_type_guess": "護照"}
+        parsed = {"doc_number": m.group(1), "doc_type_guess": "護照"}
+        cf = _extract_chinese_fields(text)
+        if cf:
+            for k in ("zh_name", "en_name", "last_name", "first_name", "date_of_birth"):
+                if cf.get(k):
+                    parsed[k] = cf[k]
+        return parsed
     return None
 
 
 def _extract_chinese_fields(text: str) -> dict | None:
     """從全頁 OCR 文字抽取「無 MRZ 證件」的中文/英文欄位。
 
-    適用對象：港澳通行證(正面)、回鄉證、台胞證、身份證等沒有標準機讀區的證件。
-    這些證件照片即使拍正面，雲端 OCR 也能讀出「姓名 / 證件號碼 / 出生」等欄位。
+    適用對象：港澳通行證(正面)、回鄉證、台胞證、身份證、護照等。
+    雲端 OCR 能讀出「姓名 / 證件號碼 / 出生」等欄位；本函數使用多組正則
+    與交叉驗證，盡量避免護照「只讀到證件號，讀不到姓名」的狀況。
 
     回傳 parsed dict（部分欄位可能有值），或 None（完全無可擷取欄位）。
     欄位設計與 MRZ 解析器相容：doc_number / date_of_birth / zh_name / en_name。
     """
     res: dict = {}
 
-    # 證件號碼：OCR 常在字母數字間塞空格（如 "C J 9 3 1..."），先去掉內部空白
-    collapsed = re.sub(r"(?<=[A-Z0-9])\s+(?=[A-Z0-9])", "", text)
+    # 證件號碼：OCR 常在字母數字間塞空格（如 "C J 9 3 1..."），先去掉內部空白。
+    # 同時移除 MRZ 機讀行（40+ 個 A-Z0-9< 連續字元），避免把 MRZ 裡的數字段誤認為證件號。
+    text_no_mrz = re.sub(r"[A-Z0-9<]{40,}", "", text)
+    collapsed = re.sub(r"(?<=[A-Z0-9])\s+(?=[A-Z0-9])", "", text_no_mrz)
 
     # 誤判黑名單：證件上常見的英文單字，絕不能當成證件號碼
     _WORD_BLACKLIST = {
         "PASSPORT", "DPASSPORT", "REPUBLIC", "NATIONAL", "IDENTITY",
         "DOCUMENT", "SURNAME", "GENDER", "NATION", "AUTHORITY", "PERMIT",
+        "PERSONAL", "PLACE", "MINISTRY", "FOREIGN", "AFFAIRS",
     }
 
     def _valid_docnum(cand: str) -> bool:
@@ -171,52 +200,136 @@ def _extract_chinese_fields(text: str) -> dict | None:
     # 例：CJ9314108（C + J9314108）、C12345678
     doc_cands = re.findall(r"(?<![0-9A-Z])([CEHDAK][A-Z0-9]{8})(?![0-9A-Z])", collapsed)
     doc_cands += re.findall(r"(?<![0-9])([0-9]{8,9})(?![0-9])", collapsed)
+    # 護照號碼有時被拆成 P 123524855，也要能合併後偵測
+    doc_cands += re.findall(r"(?<![0-9A-Z])([P][A-Z0-9]{8})(?![0-9A-Z])", collapsed)
     for cand in doc_cands:
         if _valid_docnum(cand):
             res["doc_number"] = cand
             break
 
-    # 中文姓名：標籤（姓名/名/Name）後可能跟「/」、「（」、誤讀字、換行等，
-    # 故允許標籤後最多 20 個「非中文字元」，再抓第一個 2~4 中文字。
-    #   例：'姓名 /Name （Surame, Giver numes）\n鐘明鴻'
-    nm = re.search(r"(?:姓名|名|Name)[^\u4e00-\u9fff]{0,40}([\u4e00-\u9fff]{2,4})", text, re.I)
-    if nm:
-        res["zh_name"] = nm.group(1)
-
-    # 英文姓名：護照可見英文常為「姓, 名-名」（, 或全形逗號，且常因 OCR 斷行
-    # 把姓、名拆成兩行，如 'CHUNG，\nMING-HUNG'）。MRZ 第一行則為「姓<<名」。
-    # 1) 優先從「中文姓名之後」的文字找（避開標籤括號內的 Surame, Giver 誤判）
-    # 2) 支援全形逗號（，）、連字號（MING-HUNG）、跨行（\s 含換行）
-    # 3) 退路：純空白分隔的「姓 名」（名需含連字號或為多段，降低欄位標籤誤判）
-    # 抽出後同時寫入 last_name/first_name（與 MRZ 解析器一致，供 Excel/回傳文字使用）。
+    # -----------------------------------------------------------------------
+    # 姓名抽取：多策略 + 交叉驗證
+    # -----------------------------------------------------------------------
     _EN_LABEL_BLACKLIST = {
         "NAME", "SURNAME", "GIVEN", "BIRTH", "DATE", "SEX", "NATIONAL",
         "NATIONALITY", "PASSPORT", "DOCUMENT", "AUTHORITY", "REPUBLIC",
         "CHINA", "CHINESE", "SIGNATURE", "TYPE", "ISSUE", "EXPIRY",
-        "OF", "THE", "TAIWAN", "TAIPEI", "REPUBLICOFCHINA",
+        "OF", "THE", "TAIWAN", "TAIPEI", "REPUBLICOFCHINA", "FOREIGN",
+        "AFFAIRS", "MINISTRY", "PLACE", "PERSONAL", "IDENTITY",
     }
-    en = None
-    if nm:
-        after = text[nm.end():]
-        # 先找「姓, 名 / 姓，名」（含全形逗號、可跨行）
-        en = re.search(r"\b([A-Z]{2,})[,，]\s*([A-Z]+(?:[ -][A-Z]+)*)", after)
-        # 退路：姓 名（空白分隔，名需含連字號或為多段）
-        if not en:
-            en = re.search(r"\b([A-Z]{2,})\s+([A-Z]+(?:[ -][A-Z]+){1,3})", after)
-    if not en:
-        en = re.search(r"\b([A-Z]{2,})[,，]\s*([A-Z]+(?:[ -][A-Z]+)*)", text)
-    if en:
-        last = en.group(1).strip().upper()
-        first = en.group(2).strip().upper()
-        # 排除欄位標籤誤判（如 NAME SURNAME / DATE OF BIRTH）
-        if last not in _EN_LABEL_BLACKLIST and not re.search(r"[<0-9]", first):
-            res["en_name"] = f"{last},{first}"
-            res["last_name"] = last
-            res["first_name"] = first
 
-    # 出生日期：出生/出生日期/Birth + 1981.07.08 / 1981年07月08日 / 1981-07-08
+    def _clean_en_name(last: str, first: str) -> tuple | None:
+        """清理並驗證英文姓名，回傳 (last, first) 或 None。"""
+        last = last.strip().upper()
+        first = first.strip().upper()
+        if not last or not first:
+            return None
+        if last in _EN_LABEL_BLACKLIST:
+            return None
+        # 排除數字、MRZ 填充符、過長/過短段
+        if re.search(r"[<0-9]", first) or re.search(r"[<0-9]", last):
+            return None
+        parts = re.split(r"[,，\s\-]+", f"{last} {first}")
+        for p in parts:
+            if p and (len(p) < 2 or len(p) > 15):
+                return None
+        # 排除連續 4+ 重複字母
+        if re.search(r"([A-Z])\1{3,}", last + first):
+            return None
+        return last, first
+
+    def _extract_en_name(search_text: str) -> tuple | None:
+        """從文字中抽取英文姓名，回傳 (last, first) 或 None。
+
+        支援 OCR 常見的空格干擾："GU , FONG - ZHI"、"GU FONG ZHI"、
+        "GU, FONG-ZHI"、"GU, FONG ZHI" 等。
+        """
+        # A) 姓, 名 / 姓，名（最標準，優先）；容忍標點前後空格
+        m = re.search(
+            r"\b([A-Z]{2,})\s*[,，]\s*([A-Z]+(?:\s*[ -]\s*[A-Z]+)*)",
+            search_text,
+        )
+        if m:
+            # 把 first 裡的空格正規化為單一連字號（FONG - ZHI -> FONG-ZHI）
+            first = re.sub(r"\s*-\s*", "-", m.group(2))
+            first = re.sub(r"\s+", "-", first).strip("-")
+            return _clean_en_name(m.group(1), first)
+        # B) 姓 名（空白分隔，名可含連字號或多段）
+        m = re.search(r"\b([A-Z]{2,})\s+([A-Z]+(?:\s*[ -]\s*[A-Z]+){0,3})\b", search_text)
+        if m:
+            first = re.sub(r"\s*-\s*", "-", m.group(2))
+            first = re.sub(r"\s+", "-", first).strip("-")
+            return _clean_en_name(m.group(1), first)
+        return None
+
+    # 1) 先嘗試用標籤找中文姓名
+    zh_name = None
+    zh_match = re.search(
+        r"(?:姓名|名|Name)[^\u4e00-\u9fff]{0,80}([\u4e00-\u9fff]{2,4})",
+        text, re.I,
+    )
+    if zh_match:
+        zh_name = zh_match.group(1)
+        res["zh_name"] = zh_name
+
+    # 2) 找英文姓名：優先在中文字附近，再全局搜
+    en_name = None
+    last_name = first_name = None
+    if zh_name and zh_match:
+        # 在中文字前後各 200 字元範圍找英文姓名
+        start = max(0, zh_match.start() - 200)
+        end = min(len(text), zh_match.end() + 200)
+        nearby = text[start:end]
+        pair = _extract_en_name(nearby)
+        if pair:
+            last_name, first_name = pair
+            en_name = f"{last_name},{first_name}"
+    if not en_name:
+        pair = _extract_en_name(text)
+        if pair:
+            last_name, first_name = pair
+            en_name = f"{last_name},{first_name}"
+
+    # 3) 若找到英文姓名但沒找到中文姓名 -> 反推附近的中文字
+    if en_name and not zh_name:
+        # 找到英文姓名的位置，前後 120 字元內找 2-4 個連續中文字
+        en_pos = text.find(en_name.replace(",", "，"))
+        if en_pos < 0:
+            en_pos = text.find(last_name)
+        if en_pos >= 0:
+            start = max(0, en_pos - 120)
+            end = min(len(text), en_pos + len(en_name) + 120)
+            region = text[start:end]
+            m = re.search(r"([\u4e00-\u9fff]{2,4})", region)
+            if m:
+                zh_name = m.group(1)
+                res["zh_name"] = zh_name
+
+    # 4) 最後退路：全局找孤立的中英文姓名對（適合版面乾淨的護照）
+    if not zh_name and not en_name:
+        # 找 "中文名\n英文名" 或 "中文名 英文名" 的組合
+        m = re.search(
+            r"([\u4e00-\u9fff]{2,4})\s*\n?\s*([A-Z]{2,}(?:[,，\s\-][A-Z]+)+)",
+            text,
+        )
+        if m:
+            zh_name = m.group(1)
+            pair = _extract_en_name(m.group(2))
+            if pair:
+                last_name, first_name = pair
+                en_name = f"{last_name},{first_name}"
+                res["zh_name"] = zh_name
+
+    if en_name:
+        res["en_name"] = en_name
+        res["last_name"] = last_name
+        res["first_name"] = first_name
+
+    # -----------------------------------------------------------------------
+    # 出生日期：支援 1981.07.08 / 1981年07月08日 / 1981-07-08 / 05 AUG 1989
+    # -----------------------------------------------------------------------
     dm = re.search(
-        r"(?:出生|出生日期|Birth|DOB)[：:\s]*"
+        r"(?:出生|出生日期|Birth|DOB|Date of birth)[：:\s]*"
         r"(\d{4})[./年\-](\d{1,2})[./月\-](\d{1,2})",
         text, re.I,
     )
@@ -227,6 +340,25 @@ def _extract_chinese_fields(text: str) -> dict | None:
             )
         except ValueError:
             pass
+    else:
+        # 西文日期：05 AUG 1989 / 1989 AUG 05 / 05-AUG-1989
+        mon_map = {
+            "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04",
+            "MAY": "05", "JUN": "06", "JUL": "07", "AUG": "08",
+            "SEP": "09", "OCT": "10", "NOV": "11", "DEC": "12",
+        }
+        m = re.search(
+            r"(?i)(?:出生|出生日期|Birth|DOB|Date of birth)?[：:\s]*"
+            r"(\d{1,2})[\s\-]([A-Z]{3})[\s\-](\d{4})",
+            text,
+        )
+        if m:
+            dd, mon, yyyy = m.group(1), m.group(2).upper(), m.group(3)
+            if mon in mon_map:
+                try:
+                    res["date_of_birth"] = f"{yyyy}-{mon_map[mon]}-{int(dd):02d}"
+                except ValueError:
+                    pass
 
     if not res:
         return None
