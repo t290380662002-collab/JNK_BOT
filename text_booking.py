@@ -169,6 +169,12 @@ def parse(text: str) -> dict:
                 if matched in ("入住者中文", "入住者英文", "出生年月日", "出生日期",
                                "證件號碼", "證件"):
                     has_primary = True
+                # 處理「江-泰哥-呂布 微信：泰哥服務群」同行：
+                # keyword（微信/群組/代理）前的姓名視為訂房人，補回 standalone。
+                if matched in ("微信", "群組", "代理") and label != matched:
+                    prefix = label[:label.index(matched)].strip(" ：:").strip()
+                    if prefix and re.search(r"[\u4e00-\u9fff]", prefix):
+                        standalone.append(prefix)
                 continue
         # 非 KV：含中文的獨立行
         if re.search(r"[\u4e00-\u9fff]", ln) and not any(w in ln for w in IGNORE_STANDALONE):

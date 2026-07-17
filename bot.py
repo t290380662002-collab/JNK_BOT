@@ -534,6 +534,19 @@ def _looks_like_booking(text: str) -> bool:
     return any(k in text for k in BOOKING_KEYWORDS)
 
 
+def _is_complete_inline(booking: dict) -> bool:
+    """判斷文字訂房是否已內含『完整證件資料』（中文/英文/出生/證件號碼皆齊），
+    若齊全即可直接產單，無須再掃證件照確認。"""
+    guests = booking.get("guests") or []
+    if not guests:
+        return False
+    g = guests[0]
+    return bool(
+        g.get("zh_name") and g.get("en_name")
+        and g.get("dob") and g.get("doc_number")
+    )
+
+
 def _manual_summary(booking: dict, hotel_key: str) -> str:
     cfg = HT.HOTELS[hotel_key]
     name = cfg["name"].split(" ")[0]
@@ -604,11 +617,14 @@ async def book_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1) 先貼訂房資料，格式例如：\n"
         "入住：7/21\n退房：7/23\n飯店：倫敦人\n"
         "房型：維多利亞房大床\n件數：1\n是否吸煙：吸菸\n"
-        "江-泰哥-呂布\n微信：泰哥服務群\n\n"
-        "2) 我會請你傳「證件照片」，掃完自動併入這筆訂房，"
-        "產出含訂房+證件的最終結果與 Excel。\n"
-        "（暫無證件可輸入 /skip 直接產單；房型仍留空手動補）\n\n"
-        "英文姓名 / 證件號碼 / 出生日期 由證件掃描自動填入；"
+        "入住者中文：林家妏\n入住者英文：LIN,CHIA-WEN\n"
+        "出生年月日：2000/05/18\n證件號碼：367074192\n"
+        "江-泰哥-呂布 微信：泰哥服務群\n\n"
+        "2) 若貼的內容「已含完整證件資料」（中文/英文/出生/證件號碼皆齊），"
+        "我會**直接產單**，無須再傳證件照片；\n"
+        "若缺少證件欄位，我會請你傳「證件照片」掃描併入，"
+        "（暫無證件可輸入 /skip 直接產單；房型仍留空手動補）。\n\n"
+        "英文姓名 / 證件號碼 / 出生日期 由證件掃描或你貼的文字填入；"
         "吸煙與否會填入「特別要求 Special request」欄。"
     )
 
@@ -639,7 +655,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_hotel_keyboard("bookhotel"),
         )
         return
-    # 有飯店 -> 進入「待掃證件」狀態，提示傳證件照
+    # 完整格式（已內含證件資料）-> 直接產單，不需掃證件確認
+    if _is_complete_inline(booking):
+        await _produce_combined(
+            chat_id, context, update, booking,
+            "（已偵測到完整訂房＋證件資料，直接產單，無須掃描確認）",
+        )
+        sess.pop("pending_booking", None)
+        sess.pop("awaiting_passport", None)
+        return
+    # 不完整 -> 進入「待掃證件」狀態，提示傳證件照
     sess["pending_booking"] = booking
     sess["awaiting_passport"] = True
     await _prompt_passport(update.message, context)
@@ -697,6 +722,19 @@ async def bookhotel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     cfg = HT.HOTELS.get(key, {})
     label = cfg.get("name", key)
     booking["hotel"] = key
+    # 完整格式（已內含證件資料）-> 選完飯店直接產單，不進掃證件流程
+    if _is_complete_inline(booking):
+        await q.edit_message_text(
+            f"✅ 已選擇「{label.split(' ')[0]}」，並偵測到完整訂房＋證件資料，"
+            "直接產生訂房單…"
+        )
+        await _produce_combined(
+            chat_id, context, update, booking,
+            "（已偵測到完整訂房＋證件資料，直接產單，無須掃描確認）",
+        )
+        sess.pop("pending_booking", None)
+        sess.pop("awaiting_passport", None)
+        return
     sess["pending_booking"] = booking
     sess["awaiting_passport"] = True
     await q.edit_message_text(
