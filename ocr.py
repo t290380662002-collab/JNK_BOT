@@ -10,6 +10,7 @@ OCR 混合管線：
 import os
 import re
 import io
+import json
 import base64
 import logging
 
@@ -530,6 +531,72 @@ def _sanitize(parsed: dict) -> dict:
     return parsed
 
 
+# ---------------------------------------------------------------------------
+# 常用旅客名冊（known_passengers.json）
+# ---------------------------------------------------------------------------
+# 證件 OCR 對姓名（尤其中文）時有誤讀（例：古豐誌→特照、FONG→PONG）。
+# 對重複客人，用「證件號碼」對照名冊，直接套用正確的中英文姓名與生日，
+# 這比 OCR 可靠得多，也避免每次掃描都因畫質而出錯。
+# 新增客人：編輯 known_passengers.json，鍵為證件號碼（純數字或字母數字）。
+_KNOWN_CACHE: dict | None = None
+
+
+def _load_known_passengers() -> dict:
+    global _KNOWN_CACHE
+    if _KNOWN_CACHE is not None:
+        return _KNOWN_CACHE
+    data: dict = {}
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "known_passengers.json")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("讀取 known_passengers.json 失敗：%s", e)
+        data = {}
+    # 正規化鍵：去除空白、轉大寫，便於比對
+    norm = {}
+    for k, v in data.items():
+        norm[str(k).strip().upper()] = v
+    _KNOWN_CACHE = norm
+    return _KNOWN_CACHE
+
+
+def apply_known_passenger(parsed: dict | None) -> dict | None:
+    """若 parsed 的證件號碼命中名冊，套用名冊中的正確姓名/生日。
+
+    命中時標記 parsed["known_passenger"]=True，供後續顯示「已對照名冊」提示。
+    回傳原 dict（就地修改）或 None。冪等：重複呼叫無副作用。
+    """
+    if not parsed:
+        return parsed
+    dn = parsed.get("doc_number")
+    if not dn:
+        return parsed
+    kp = _load_known_passengers().get(str(dn).strip().upper())
+    if not kp:
+        return parsed
+    changed = False
+    if kp.get("zh_name"):
+        parsed["zh_name"] = kp["zh_name"]
+        changed = True
+    if kp.get("en_name"):
+        en = str(kp["en_name"]).strip()
+        parsed["en_name"] = en
+        if "," in en:
+            ln, fn = en.split(",", 1)
+            parsed["last_name"] = ln.strip().upper()
+            parsed["first_name"] = fn.strip().upper()
+        changed = True
+    if kp.get("date_of_birth"):
+        parsed["date_of_birth"] = kp["date_of_birth"]
+        changed = True
+    if changed:
+        parsed["known_passenger"] = True
+        logger.info("命中常用旅客名冊：證件號 %s", dn)
+    return parsed
+
+
 def process_image(image_bytes: bytes) -> dict | None:
     """
     回傳 dict：
@@ -570,13 +637,15 @@ def process_image(image_bytes: bytes) -> dict | None:
             if parsed:
                 for k in ("doc_number", "date_of_birth", "sex",
                           "nationality", "expiry_date", "issuer",
-                          "doc_type_guess", "last_name", "first_name"):
+                          "doc_type_guess", "last_name", "first_name",
+                          "en_name"):
                     if parsed.get(k):
                         merged[k] = parsed[k]
             # 若 MRZ 沒給英文姓名（單行 MRZ 缺第一行），但 cf 抽到 en_name，則補上
             if not merged.get("en_name") and merged.get("last_name"):
                 merged["en_name"] = f"{merged['last_name']},{merged.get('first_name','')}"
             merged = _sanitize(merged)
+            merged = apply_known_passenger(merged)
             if merged:
                 return {
                     "parsed": merged,
@@ -610,12 +679,14 @@ def process_image(image_bytes: bytes) -> dict | None:
         full = ""
     parsed = _parse_from_free_text(full)
     parsed = _sanitize(parsed)
+    parsed = apply_known_passenger(parsed)
     if parsed:
         return {"parsed": parsed, "confidence": "low", "source": "local_text", "raw": full}
 
     # 本地也嘗試中文欄位（Tesseract 雖弱，偶能撈到證件號碼/中文姓名）
     cf = _extract_chinese_fields(full)
     cf = _sanitize(cf)
+    cf = apply_known_passenger(cf)
     if cf:
         return {
             "parsed": cf,
@@ -765,4 +836,41 @@ def _ocrspace_ocr(image_bytes: bytes) -> str:
                     texts.append(t)
         except Exception as e:  # noqa: BLE001
             logger.warning("OCR.space(%s) 例外：%s", lang, e)
+
+    # 底部機讀區（MRZ）聚焦：護照 MRZ 固定位於底部，單獨裁切+放大後識別，
+    # 可顯著提升「第一行（含英文姓名 GU<<FONG-ZHI）」的讀取率——
+    # 這正是之前被誤讀成可見文字 PONG-ZHI 的痛點。
+    try:
+        img = Image.open(io.BytesIO(payload)).convert("RGB")
+        w, h = img.size
+        crop = img.crop((0, int(h * 0.60), w, h))   # 底部 40%
+        cw, ch = crop.size
+        scale = 2.4
+        crop = crop.resize((int(cw * scale), int(ch * scale)), Image.LANCZOS)
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=95)
+        crop_bytes = buf.getvalue()
+        if len(crop_bytes) <= 1_000_000:
+            r = requests.post(
+                url,
+                data={
+                    "apikey": key,
+                    "language": "eng",
+                    "isOverlayRequired": "false",
+                    "scale": "true",
+                    "OCREngine": "1",
+                },
+                files={"image": ("mrz.jpg", crop_bytes, "image/jpeg")},
+                timeout=25,
+            )
+            r.raise_for_status()
+            j = r.json()
+            if not j.get("IsErroredOnProcessing"):
+                for p in j.get("ParsedResults", []):
+                    t = p.get("ParsedText", "")
+                    if t:
+                        texts.append(t)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("OCR.space 底部機讀區聚焦失敗（不影響主流程）：%s", e)
+
     return "\n".join(texts)

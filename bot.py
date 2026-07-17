@@ -98,6 +98,8 @@ def fmt_result(r: dict) -> str:
         lines.append(f"• 中文姓名：{p['zh_name']}")
     if r.get("no_mrz"):
         lines.append("• 備註：未偵測到 MRZ，欄位由照片文字擷取，請務必核對")
+    if r.get("parsed", {}).get("known_passenger"):
+        lines.append("• 備註：✅ 已對照常用旅客名冊，姓名與生日已自動校正")
     return "\n".join(lines)
 
 
@@ -126,6 +128,9 @@ def format_passport_text(r: dict) -> str:
         f"出生年月日：{dob}\n"
         f"證件號碼：{doc}"
     )
+    # 命中常用旅客名冊：姓名/生日已由名冊正確化，給使用者明確確認
+    if p.get("known_passenger"):
+        text += "\n✅ 已對照常用旅客名冊（證件號碼相符），姓名與生日已自動校正。"
     # 資料核對：台灣姓名拼音 + 是否滿 21 歲
     en_for_check = p.get("en_name") or (f"{last},{first}" if last and first else None)
     warns = validator.validate_guest(zh if zh != "（未提供）" else None,

@@ -29,6 +29,7 @@ import re
 from datetime import datetime
 
 from timeutil import taipei_now
+import ocr
 
 HOTEL_ALIASES = {
     "倫敦人": "londoner", "伦敦人": "londoner", "londoner": "londoner",
@@ -254,13 +255,28 @@ def parse(text: str) -> dict:
     if booking["room_count"] is None:
         booking["room_count"] = 1
     booking["_has_primary"] = has_primary
+
+    # 證件號碼命中常用旅客名冊 -> 自動校正姓名/生日（掃描與貼文皆適用）
+    for g in booking.get("guests", []):
+        try:
+            ocr.apply_known_passenger(g)
+        except Exception:  # noqa: BLE001
+            pass
+
     return booking
 
 
 def _passport_guest(parsed: dict) -> dict:
     """把掃描證件 parsed 轉成 guest dict（只含非空欄位）。
-    生日歸一化為 YYYY-MM-DD（處理點號 / 中文年月日）。"""
+    生日歸一化為 YYYY-MM-DD（處理點號 / 中文年月日）。
+    若證件號碼命中常用旅客名冊，直接套用正確中英文姓名與生日。"""
     parsed = parsed or {}
+    # 先套用名冊（photo 掃描已在 ocr.process_image 套過，此處冪等；
+    # 對 inline 含證件號的情境也能補正確姓名）。
+    try:
+        ocr.apply_known_passenger(parsed)
+    except Exception:  # noqa: BLE001
+        pass
     last = (parsed.get("last_name") or "").strip().upper()
     first = (parsed.get("first_name") or "").strip().upper()
     en = parsed.get("en_name")
