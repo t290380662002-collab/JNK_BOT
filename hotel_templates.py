@@ -32,6 +32,7 @@ FORM_LABELS = {
     "pax": ["人數", "Pax"],
     "rooms": ["No.of Rooms", "Rooms("],
     "special_request": ["特別要求", "Special request"],
+    "date": ["Date:", "日期"],
 }
 
 # 工作表1（清單表）統一為 10 欄「訂房摘要表」。

@@ -27,7 +27,7 @@ booking（文字訂房）結構：
 import os
 import re
 import tempfile
-from datetime import datetime
+from datetime import datetime, date
 
 import openpyxl
 
@@ -195,6 +195,17 @@ def _find_label(ws, subs):
     return None
 
 
+def _find_date_label(ws):
+    """專找獨立的 'Date:' 標籤（避開 C/I Date、C/O Date）。"""
+    for row in ws.iter_rows():
+        for c in row:
+            if c.value and isinstance(c.value, str):
+                v = c.value.strip()
+                if v.startswith("Date:") and not re.search(r"C\s*[/_]\s*[IO]|入住|退房", v, re.I):
+                    return c
+    return None
+
+
 def _input_cell(ws, label_cell):
     """回傳標籤右側輸入格（若在合併範圍則取左上角）。"""
     mr = _merged_range_of(ws, label_cell.row, label_cell.column)
@@ -230,9 +241,14 @@ def _fill_form_sheet(ws, b: dict):
         "pax": b.get("pax", ""),
         "rooms": b.get("rooms", ""),
         "special_request": special,
+        "date": datetime.now().date(),
     }
     for field, subs in HT.FORM_LABELS.items():
-        lc = _find_label(ws, subs)
+        if field == "date":
+            # Date: 欄位需避免誤匹配 C/I Date / C/O Date，改由專用搜尋
+            lc = _find_date_label(ws)
+        else:
+            lc = _find_label(ws, subs)
         if lc is None:
             continue
         v = values.get(field, "")
@@ -240,7 +256,7 @@ def _fill_form_sheet(ws, b: dict):
             continue
         cell = _input_cell(ws, lc)
         cell.value = v
-        if isinstance(v, datetime):
+        if isinstance(v, (datetime, date)):
             cell.number_format = _CHECK_FMT if field in ("checkin", "checkout") else _DOB_FMT
 
 
