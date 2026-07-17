@@ -205,7 +205,12 @@ async def _produce_combined(chat_id, context, update, booking, note=""):
         path = await asyncio.to_thread(template_filler.fill_manual, hotel_key, booking)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         zh = HT.HOTELS[hotel_key]["name"].split(" ")[0]
-        fname = f"{zh}_整合_{ts}.xlsx"
+        # 檔名改用入住人中文姓名（無中文則英文，再無則「未提供姓名」）；
+        # 過濾 Windows 檔名非法字元並限制長度。
+        g0 = (booking.get("guests") or [{}])[0]
+        guest_name = g0.get("zh_name") or g0.get("en_name") or "未提供姓名"
+        guest_name = re.sub(r"[\[\]\:\*\?\/\\]", "", guest_name)[:20]
+        fname = f"{zh}_{guest_name}_{ts}.xlsx"
     except Exception as e:  # noqa: BLE001
         logger.exception("整合訂房單產生失敗")
         await context.bot.send_message(chat_id, f"❌ Excel 產生失敗：{e}")
