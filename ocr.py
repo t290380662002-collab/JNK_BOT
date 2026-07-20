@@ -145,6 +145,14 @@ def _reconstruct_mrz_lines(text: str) -> list:
         return []
     blob = "".join(frags)
 
+    # 0) 先判斷是否為 TD1（港澳通行證/回鄉證/台胞證）：以 I/A/C/T 開頭，
+    #    且內含出生日期+性別+效期特徵。TD1 優先於 TD3，避免把卡式證件
+    #    的證件號誤當成護照第二行。
+    if blob and blob[0] in "IACT" and re.search(r"\d{6}[0-9<][MFX<]\d{6}", blob):
+        td1 = mrz_parser._reconstruct_td1_lines([blob])
+        if td1:
+            return list(td1)
+
     # 1) 以證件號碼（9 位數字後接 '<'）錨定第二行起點；
     #    其前方（不足 44 字則從 0 起）即第一行。
     m2 = re.search(r"\d{9}<", blob)
@@ -211,6 +219,24 @@ def _parse_from_free_text(text: str) -> dict | None:
                 for k in ("zh_name", "en_name", "last_name", "first_name"):
                     if cf.get(k):
                         parsed[k] = cf[k]
+        # 卡式證件（港澳通行證/回鄉證/台胞證）MRZ 常被誤讀或黏行，
+        # 以可見文字欄位補強/覆蓋 doc_number、date_of_birth、姓名。
+        if parsed and parsed.get("doc_type_guess") in ("卡式證件", "證件(無MRZ)"):
+            cf = _extract_chinese_fields(text)
+            if cf:
+                # 優先用可見文字：姓名、證件號碼、出生日期
+                for k in ("zh_name", "en_name", "last_name", "first_name", "date_of_birth"):
+                    if cf.get(k) and not parsed.get(k):
+                        parsed[k] = cf[k]
+                # 證件號碼：若 MRZ 解析為空或僅數字，以可見文字為主
+                if cf.get("doc_number"):
+                    mrz_doc = parsed.get("doc_number") or ""
+                    vis_doc = cf["doc_number"]
+                    if not mrz_doc or (mrz_doc.isdigit() and not vis_doc.isdigit()):
+                        parsed["doc_number"] = vis_doc
+                    elif mrz_doc and vis_doc not in mrz_doc and mrz_doc not in vis_doc:
+                        # 兩者完全不同且可見文字非純數字，採用可見文字
+                        parsed["doc_number"] = vis_doc
         if parsed:
             return parsed
         # 單行 MRZ 第二行：有 doc/dob，但缺姓名 -> 從可見文字補姓名
@@ -270,10 +296,10 @@ def _extract_chinese_fields(text: str) -> dict | None:
 
     # 港澳通行證 C+8 位(字母或數字) / 台胞證 / 回鄉證 等
     # 例：CJ9314108（C + J9314108）、C12345678
-    doc_cands = re.findall(r"(?<![0-9A-Z])([CEHDAK][A-Z0-9]{8})(?![0-9A-Z])", collapsed)
+    doc_cands = re.findall(r"(?<![0-9A-Z])([CEHDAK][A-Z0-9]{7,10})(?![0-9A-Z])", collapsed)
     doc_cands += re.findall(r"(?<![0-9])([0-9]{8,9})(?![0-9])", collapsed)
     # 護照號碼有時被拆成 P 123524855，也要能合併後偵測
-    doc_cands += re.findall(r"(?<![0-9A-Z])([P][A-Z0-9]{8})(?![0-9A-Z])", collapsed)
+    doc_cands += re.findall(r"(?<![0-9A-Z])([P][A-Z0-9]{7,10})(?![0-9A-Z])", collapsed)
     for cand in doc_cands:
         if _valid_docnum(cand):
             res["doc_number"] = cand
@@ -372,10 +398,19 @@ def _extract_chinese_fields(text: str) -> dict | None:
             start = max(0, en_pos - 120)
             end = min(len(text), en_pos + len(en_name) + 120)
             region = text[start:end]
-            m = re.search(r"([\u4e00-\u9fff]{2,4})", region)
-            if m:
-                zh_name = m.group(1)
-                res["zh_name"] = zh_name
+            # 排除常見證件標籤/機關名稱，避免把「往來港澳」「通行證」當姓名
+            _ZH_BLACKLIST = {
+                "往來港澳", "通行证", "通行證", "中華人民共和國",
+                "中华人民共和国", "出入境管理局", "四川", "出生日期",
+                "有效期限", "签发机关", "簽發機關", "签发地点", "簽發地點",
+                "性别", "性別", "男", "女", "姓名", "名", "Name",
+            }
+            candidates = re.findall(r"[\u4e00-\u9fff]{2,4}", region)
+            for cand in candidates:
+                if cand not in _ZH_BLACKLIST:
+                    zh_name = cand
+                    res["zh_name"] = zh_name
+                    break
 
     # 4) 最後退路：全局找孤立的中英文姓名對（適合版面乾淨的護照）
     if not zh_name and not en_name:
@@ -614,6 +649,7 @@ def process_image(image_bytes: bytes) -> dict | None:
     if len(lines) >= 2:
         parsed = mrz_parser.parse(lines)
         parsed = _sanitize(parsed)
+        parsed = apply_known_passenger(parsed)
         if parsed:
             return {
                 "parsed": parsed,

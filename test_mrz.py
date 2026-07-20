@@ -40,6 +40,24 @@ CASES = [
             "expiry_date": "2025-01-01",
         },
     },
+    {
+        "name": "卡式 TD1（OCR 三行黏成一行）",
+        "lines": [
+            "I<CHNCG416393283<412086<050316"
+            + "0503165M2412098CHN<<<<<<<<<<<<"
+            + "LI<<HONGDA<<<<<<<<<<<<<<<<<<<<",
+        ],
+        "expect": {
+            "doc_type_guess": "卡式證件",
+            "last_name": "LI",
+            "first_name": "HONGDA",
+            "doc_number": "CG4163932",
+            "nationality": "中國",
+            "date_of_birth": "2005-03-16",
+            "sex": "M",
+            "expiry_date": "2024-12-09",
+        },
+    },
 ]
 
 

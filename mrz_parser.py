@@ -89,8 +89,14 @@ def parse(mrz_lines):
 
     # 單行：需判斷是 TD3 第一行（含英文姓名）還是第二行（證件號/生日）。
     # 第一行以 P/V/A/C/I 開頭，姓名在位置 5 之後；第二行以數字或國碼開頭。
+    # 注意：若單行其實是 TD1 三行黏成（長度 >= 60、含生日+性別+效期），
+    #       應優先走 TD1 拆分，避免誤判為護照單行 MRZ。
     if longs:
         l0 = longs[0]
+        if len(l0) >= 60 and l0[0] in "IACT" and re.search(r"\d{6}[0-9<][MFX<]\d{6}", l0):
+            td1 = _reconstruct_td1_lines([l0])
+            if td1:
+                return _parse_td1(*td1)
         if l0[0] in "PVACI":
             last, first = _split_names(l0[5:])
             if last:
@@ -108,6 +114,13 @@ def parse(mrz_lines):
         line1, line2, name = _select_td1(mrz_like)
         return _parse_td1(line1, line2, name)
 
+    # TD1 容錯：OCR 常把三行機讀碼（港澳通行證/回鄉證/台胞證）黏成一整行，
+    # 或只讀到 line1+line2。此處嘗試把最長候選行拆回標準 30/30/30 三段。
+    if mrz_like:
+        td1 = _reconstruct_td1_lines(mrz_like)
+        if td1:
+            return _parse_td1(*td1)
+
     return None
 
 
@@ -122,8 +135,10 @@ def _select_td1(lines):
     line2 = date_lines[0] if date_lines else lines[1]
 
     others = [l for l in lines if l != line2]
-    # 證件行：通常以 I/A/C 開頭後接 '<'
+    # 證件行：通常以 I/A/C 開頭後接 '<'（T 常為 I< 誤讀）
     line1 = next((l for l in others if l[:1] in "IAC" and l[1:2] == "<"), None)
+    if line1 is None:
+        line1 = next((l for l in others if l[:1] in "T" and l[1:2] in "<SCG"), None)
     if line1 is None:
         others_sorted = sorted(others, key=len, reverse=True)
         line1 = others_sorted[0]
@@ -131,6 +146,60 @@ def _select_td1(lines):
     else:
         name = [l for l in others if l != line1][0]
     return line1, line2, name
+
+
+def _reconstruct_td1_lines(mrz_like):
+    """把 OCR 黏成一整行的 TD1 機讀碼拆回 (line1, line2, name_line)。
+
+    港澳通行證/回鄉證/台胞證的 TD1 標準為三行各 30 字。實務上 OCR 容易
+    把底部三行讀成一行或兩行，此處先取最長的候選行，再依 TD1 佈局拆分。
+    """
+    # 取最長且含 '<' 的候選行（最可能是完整機讀區）
+    blob = max(mrz_like, key=len)
+    blob = _clean(blob)
+
+    # 容錯：若開頭把 'I<' 誤讀成 'T'，嘗試修正
+    if blob.startswith("T") and len(blob) >= 20:
+        # 嘗試把 'TS' 視為 'I<CHN' 的誤讀：T->I, S-><, C->C, G->H, ?
+        # 最實用做法是：如果後面出現 CHN/SCG，直接重設為 I<CHN 開頭
+        if re.match(r"T[SCG][CG][NH]", blob):
+            blob = "I<CHN" + blob[5:]
+
+    # 若總長 >= 60，視為 line1+line2+name_line 黏在一起；
+    # 優先按 30/30/30 切，再嘗試 30/30/... 。
+    if len(blob) >= 60:
+        # 用生日+性別+效期特徵定位 line2 起點，使拆分更穩健
+        m = re.search(r"(\d{6}[0-9<][MFX<]\d{6})", blob)
+        if m:
+            i2 = m.start()
+            # line2 在 TD1 中應位於 30-59；容錯取前後一段
+            i2 = max(30, min(i2, len(blob) - 30))
+            line2 = blob[i2:i2 + 30]
+            line1 = blob[max(0, i2 - 30):i2]
+            name = blob[i2 + 30:]
+            # 若 line1 不足 30，由 blob 前端補
+            if len(line1) < 30:
+                line1 = blob[:30].ljust(30, "<")
+            return line1, line2, name
+        # 退化：直接 30/30/30 切
+        return blob[:30], blob[30:60], blob[60:]
+
+    # 若只有 line1+line2（30~59 字），日期行在後半段
+    if 30 <= len(blob) < 60:
+        m = re.search(r"(\d{6}[0-9<][MFX<]\d{6})", blob)
+        if m:
+            i2 = m.start()
+            line2 = blob[i2:i2 + 30]
+            line1 = blob[:i2]
+            # line1 應為 30 字；若不足則左對齊並補 '<'
+            if len(line1) < 30:
+                line1 = line1.ljust(30, "<")
+            name = blob[i2 + 30:]
+            return line1, line2, name
+        # 退化：前半為 line1，後半為 line2
+        return blob[:30].ljust(30, "<"), blob[30:].ljust(30, "<"), ""
+
+    return None
 
 
 def _parse_td3(l1: str, l2: str) -> dict:
@@ -169,9 +238,14 @@ def _parse_td3_line2(l2: str) -> dict:
 
 
 def _parse_td1(l1: str, l2: str, l3: str) -> dict:
-    res = {}
-    res["doc_type_guess"] = "卡式證件"
-    res["issuer"] = l1[2:5]
+    res = {"doc_type_guess": "卡式證件"}
+    l1 = (l1 or "").ljust(30, "<")
+    l2 = (l2 or "").ljust(30, "<")
+    l3 = (l3 or "").ljust(30, "<")
+    # line1 容錯：I<CHN 被誤讀成 T 開頭時，強制轉回 I<CHN
+    if l1[0] == "T" and l1[1:3] in ("SC", "CG", "CH", "HN"):
+        l1 = "I<CHN" + l1[5:]
+    res["issuer"] = l1[2:5] if l1[2:5] != "<<<" else "CHN"
     res["doc_number"] = l1[5:14].rstrip("<")
     res["date_of_birth"] = _parse_date(l2[0:6])
     res["sex"] = l2[7:8]

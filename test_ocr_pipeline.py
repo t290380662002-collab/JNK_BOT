@@ -19,16 +19,19 @@ def fake_tesseract(img, config=""):
     return MRZ_TEXT
 
 
-def fake_preprocess(img):
+def fake_prep_mrz(img, upscale_to):
     return img
 
 
 def fake_open(bio):
-    return object()
+    img = mock.MagicMock()
+    img.size = (1200, 800)
+    img.convert.return_value = img
+    return img
 
 
 with mock.patch.object(ocr.pytesseract, "image_to_string", fake_tesseract), \
-     mock.patch.object(ocr, "_preprocess", fake_preprocess), \
+     mock.patch.object(ocr, "_prep_mrz", fake_prep_mrz), \
      mock.patch.object(ocr.Image, "open", fake_open):
     res = ocr.process_image(b"fake-bytes")
 
