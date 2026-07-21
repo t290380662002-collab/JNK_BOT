@@ -591,8 +591,90 @@ def _render(cfg: dict, bookings: list) -> str:
     ts = taipei_now().strftime("%Y%m%d_%H%M%S")
     out_name = f"{cfg.get('key', 'booking')}_{ts}.xlsx"
     out_path = os.path.join(tempfile.gettempdir(), out_name)
+    _add_agent_order_sheet(wb, bookings)
     wb.save(out_path)
     return out_path
+
+
+# ---------------------------------------------------------------------------
+# 代理訂單分頁
+# ---------------------------------------------------------------------------
+_AGENT_SHEET_NAME = "代理訂單"
+_AGENT_HEADERS = ["代理", "訂單編號", "英文姓名", "中文姓名", "入住日期", "退房日期"]
+_AGENT_DISPLAY = {"AT": "信威"}
+
+
+def _agent_display(code: str) -> str:
+    """代理代碼 → 顯示名稱。"""
+    if not code:
+        return ""
+    return _AGENT_DISPLAY.get(code.strip(), code.strip())
+
+
+def _fmt_date_cell(v):
+    """把 checkin/checkout 統一為 date 物件（顯示 2026/07/31）。"""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (datetime, date)):
+        if isinstance(v, datetime):
+            return v.date()
+        return v
+    s = str(v).strip()
+    m = re.match(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s)
+    if m:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.search(r"(\d{1,2})[./](\d{1,2})", s)
+    if m:
+        y = taipei_now().year
+        return date(y, int(m.group(1)), int(m.group(2)))
+    return None
+
+
+def _add_agent_order_sheet(wb, bookings):
+    """新增『代理訂單』分頁，標題列 + 每位客人一列。
+
+    欄位：代理 | 訂單編號 | 英文姓名 | 中文姓名 | 入住日期 | 退房日期
+    """
+    # 若已存在同名 sheet，刪除後重建
+    if _AGENT_SHEET_NAME in wb.sheetnames:
+        del wb[_AGENT_SHEET_NAME]
+    ws = wb.create_sheet(_AGENT_SHEET_NAME)
+    # 標題列
+    for col, h in enumerate(_AGENT_HEADERS, start=1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font = c.font.copy(bold=True)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    # 資料列
+    row = 2
+    for b in bookings:
+        agent = _agent_display(b.get("agent") or "")
+        en_name = b.get("en") or b.get("surname", "")
+        if b.get("firstname"):
+            en_name = f"{b.get('surname','')},{b.get('firstname','')}".strip(",")
+        en_name = (en_name or "").upper()
+        zh_name = b.get("zh") or ""
+        ci = _fmt_date_cell(b.get("checkin"))
+        co = _fmt_date_cell(b.get("checkout"))
+        ws.cell(row=row, column=1, value=agent)
+        ws.cell(row=row, column=2, value=None)  # 訂單編號留空待人工填/自動產生
+        ws.cell(row=row, column=3, value=en_name)
+        ws.cell(row=row, column=4, value=zh_name)
+        cci = ws.cell(row=row, column=5, value=ci)
+        cco = ws.cell(row=row, column=6, value=co)
+        if ci:
+            cci.number_format = "yyyy/mm/dd"
+        if co:
+            cco.number_format = "yyyy/mm/dd"
+        for col in range(1, 7):
+            ws.cell(row=row, column=col).alignment = Alignment(
+                horizontal="center", vertical="center"
+            )
+        row += 1
+    # 欄寬
+    widths = [10, 14, 22, 14, 14, 14]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
 
 
 def fill(hotel_key: str, records: list) -> str:
