@@ -9,8 +9,13 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from timeutil import taipei_now
+
+# 代理代碼 → 顯示名稱對照表（檔案命名用）
+_AGENT_DISPLAY = {
+    "AT": "信威",
+}
 
 
 def _build_version() -> str:
@@ -243,14 +248,44 @@ async def _produce_combined(chat_id, context, update, booking, note=""):
         booking["guests"] = [{}]
     try:
         path = await asyncio.to_thread(template_filler.fill_manual, hotel_key, booking)
-        ts = taipei_now().strftime("%Y%m%d_%H%M%S")
         zh = HT.HOTELS[hotel_key]["name"].split(" ")[0]
-        # 檔名改用入住人中文姓名（無中文則英文，再無則「未提供姓名」）；
-        # 過濾 Windows 檔名非法字元並限制長度。
+
+        # --- 檔名：MM.DD-MM.DD-飯店-代理-入住人 ---
+        def _fdate(d) -> str:
+            """把 check_in/check_out 轉成 MM.DD 格式。"""
+            if d is None:
+                return "??.??"
+            if isinstance(d, (datetime, date)):
+                return d.strftime("%m.%d")
+            # 字串：嘗試 YYYY-MM-DD / YYYY/MM/DD / M/D / MM/DD
+            s = str(d).strip()
+            ym = re.match(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s)
+            if ym:
+                return f"{int(ym.group(2)):02d}.{int(ym.group(3)):02d}"
+            md = re.search(r"(\d{1,2})\D(\d{1,2})", s)
+            if md:
+                m1, m2 = int(md.group(1)), int(md.group(2))
+                # 若兩個數其中一個 > 12，那它是日，另一個是月
+                if m1 > 12 and m2 <= 12:
+                    return f"{m2:02d}.{m1:02d}"
+                return f"{m1:02d}.{m2:02d}"
+            return s.replace("-", ".").replace("/", ".")[:5]
+
+        ci = _fdate(booking.get("check_in"))
+        co = _fdate(booking.get("check_out"))
+
+        agent_raw = (booking.get("agent") or "").strip()
+        agent_name = _AGENT_DISPLAY.get(agent_raw, agent_raw)
+
         g0 = (booking.get("guests") or [{}])[0]
-        guest_name = g0.get("zh_name") or g0.get("en_name") or "未提供姓名"
+        guest_name = g0.get("zh_name") or g0.get("en_name") or "未提供"
         guest_name = re.sub(r"[\[\]\:\*\?\/\\]", "", guest_name)[:20]
-        fname = f"{zh}_{guest_name}_{ts}.xlsx"
+
+        parts = [ci, co, zh]
+        if agent_name:
+            parts.append(agent_name)
+        parts.append(guest_name)
+        fname = "-".join(parts) + ".xlsx"
     except Exception as e:  # noqa: BLE001
         logger.exception("整合訂房單產生失敗")
         await context.bot.send_message(chat_id, f"❌ Excel 產生失敗：{e}")
