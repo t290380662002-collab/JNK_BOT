@@ -181,6 +181,35 @@ def _apply_kv(booking, primary, label, value):
         primary["doc_number"] = _first_token(value)
 
 
+def _detect_agent_marker(lines) -> str | None:
+    """偵測代理標記 'AT'（獨立行，或貼在證件號碼行尾），回傳 'AT'，否則 None。
+
+    判定規則（避免英文姓名/文字誤判）：
+      · 整行就是 'AT'（不區分大小寫）
+      · 證件號碼/證件 標籤行，冒號後的值以獨立 token 'AT' 結尾
+      · 純證件號型態行（C+8 碼等）後接 'AT'，如「C27905647 AT」
+    """
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            continue
+        # 1) 獨立行整行就是 AT
+        if s.upper() == "AT":
+            return "AT"
+        # 2) 證件號碼行尾的 AT（如「證件號碼：C27905647 AT」）
+        if s.startswith(("證件號碼", "證件")):
+            val = re.split(r"[：:]", s, maxsplit=1)[-1].strip()
+            if re.search(r"(?:^|\s)AT$", val.upper()):
+                return "AT"
+            continue
+        # 3) 純證件號 + AT 獨立行（無標籤，複製貼上變體）
+        if re.match(r"^[CEHDAK][A-Za-z0-9]{8}(?:\s+AT)?$", s, re.IGNORECASE):
+            # 行尾為 AT 才視為代理標記
+            if re.search(r"(?:^|\s)AT$", s.upper()):
+                return "AT"
+    return None
+
+
 def parse(text: str) -> dict:
     """解析文字訂房 -> booking dict。"""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -255,6 +284,12 @@ def parse(text: str) -> dict:
     if booking["room_count"] is None:
         booking["room_count"] = 1
     booking["_has_primary"] = has_primary
+
+    # 代理標記 'AT'：獨立行或貼在證件號碼後，自動填入 代理 欄
+    if not booking.get("agent"):
+        marker = _detect_agent_marker(lines)
+        if marker:
+            booking["agent"] = marker
 
     # 證件號碼命中常用旅客名冊 -> 自動校正姓名/生日（掃描與貼文皆適用）
     for g in booking.get("guests", []):
