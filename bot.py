@@ -12,6 +12,24 @@ import uuid
 from datetime import datetime
 from timeutil import taipei_now
 
+
+def _build_version() -> str:
+    """回傳部署版本（Render 會注入 RENDER_GIT_COMMIT，本機降級用 git rev-parse）。"""
+    commit = os.environ.get("RENDER_GIT_COMMIT", "").strip()
+    if commit:
+        return commit[:7]
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return "local"
+
 from aiohttp import web
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -238,7 +256,10 @@ async def _produce_combined(chat_id, context, update, booking, note=""):
         await context.bot.send_message(chat_id, f"❌ Excel 產生失敗：{e}")
         return
     with open(path, "rb") as f:
-        await context.bot.send_document(chat_id=chat_id, document=f, filename=fname)
+        await context.bot.send_document(
+            chat_id=chat_id, document=f, filename=fname,
+            caption=f"🔖 build: {_build_version()}",
+        )
     try:
         os.remove(path)
     except OSError:
@@ -797,6 +818,7 @@ async def _run_webhook_server(app: Application, base: str):
             "error": str(diag["error"]) if diag["error"] else None,
             "ocr_space_key_loaded": bool(os.environ.get("OCR_SPACE_KEY")),
             "cloud_providers": _cloud,
+            "build": _build_version(),
         })
 
     aio_app = web.Application()
