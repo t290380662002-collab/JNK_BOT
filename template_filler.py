@@ -21,7 +21,7 @@ booking（文字訂房）結構：
 行為（依用戶確認）：
   · 有清單表的酒店：清單表填全部客人（掃描時中文姓名留空手動補；文字訂房則填入中文姓名）
   · 每位客人各產生一張訂房單主表格（label-driven 填入）
-  · 房型：依用戶指示「無須填入」，均留空手動補
+  · 房型：若輸入含明確房型代碼（如 TC）或完整中文房型名，自動在 RM TYPE 區域勾選對應選項
   · 吸菸：True/False 會填入訂房單主表格「特別要求 Special request」欄（吸菸/禁煙）
 """
 import os
@@ -146,7 +146,9 @@ def _normalize_record(rec: dict) -> dict:
         # 群組/代理：文字訂房帶入清單表
         b["group"] = manual.get("group") or manual.get("wechat") or ""
         b["agent"] = manual.get("agent") or manual.get("booker") or ""
-        # 房型依用戶指示不填 -> room 留空
+        # 房型：若輸入明確則自動勾選（代碼優先）
+        if manual.get("room_type"):
+            b["room_type"] = manual["room_type"]
     return b
 
 
@@ -168,6 +170,7 @@ def _bookings_from_manual(booking: dict) -> list:
             "check_in": booking.get("check_in"),
             "check_out": booking.get("check_out"),
             "room_count": booking.get("room_count"),
+            "room_type": booking.get("room_type"),
             "pax": booking.get("pax"),
             "smoking": booking.get("smoking"),
             "wechat": booking.get("wechat"),
@@ -244,6 +247,145 @@ def _clean_special_label(s):
     return s
 
 
+# ---------------------------------------------------------------------------
+# 房型自動勾選
+# ---------------------------------------------------------------------------
+_ROOM_CODE_RE = re.compile(r"\(([A-Z0-9/]+)\)")
+
+
+def _pinyin(text: str) -> str:
+    """將中文轉為無調號拼音，用於簡繁/異體字比對。"""
+    try:
+        from pypinyin import lazy_pinyin
+        return "".join(lazy_pinyin(text or "", style=0)).lower()
+    except Exception:  # noqa: BLE001
+        return (text or "").lower()
+
+
+def _char_similarity(a: str, b: str) -> float:
+    """字元層級相似度（簡繁通用）：相同字元或同拼音即視為匹配。"""
+    if not a or not b:
+        return 0.0
+    pa, pb = _pinyin(a), _pinyin(b)
+    if pa == pb:
+        return 1.0
+    # 簡單的共同字元比例
+    set_a = set(a)
+    set_b = set(b)
+    inter = set_a & set_b
+    union = set_a | set_b
+    if not union:
+        return 0.0
+    return len(inter) / len(union)
+
+
+def _find_room_type_cells(ws):
+    """找出訂房單主表格中 RM TYPE 區域的所有帶勾選框選項格。"""
+    cells = []
+    for row in ws.iter_rows(min_row=1, max_row=80):
+        for c in row:
+            if c.value and isinstance(c.value, str):
+                v = c.value
+                # 勾選框格式：(      ) 中文房型 (CODE)
+                # 已勾選格式：(✓) 中文房型 (CODE)
+                if _ROOM_CODE_RE.search(v) and re.search(r"^\([\s✓]*\)", v):
+                    cells.append(c)
+    return cells
+
+
+def _room_option_name(option_text: str) -> str:
+    """從選項文字抽取出中文房型名稱，例如 '( ) 維多利亞套房 (TC)' -> '維多利亞套房'。"""
+    # 去掉開頭勾選框
+    body = re.sub(r"^\([\s✓]*\)\s*", "", option_text)
+    # 去掉尾端代碼括號
+    body = _ROOM_CODE_RE.sub("", body).strip()
+    return body
+
+
+def _match_room_type(room_type_input: str, option_text: str) -> int:
+    """回傳房型輸入與模板選項的匹配分數（0~100）。"""
+    if not room_type_input or not option_text:
+        return 0
+    rt = str(room_type_input).lower().replace("，", ",").replace("、", ",")
+    opt = option_text.lower()
+    opt_name = _room_option_name(option_text).lower()
+
+    # 1) 房型代碼完全匹配（如 TC、KC、DBK1）
+    code_match = _ROOM_CODE_RE.findall(option_text)
+    for code in code_match:
+        # 代碼需以獨立片段出現在輸入中
+        if re.search(r"(?:^|[\s,/（(])" + re.escape(code.lower()) + r"(?:$|[\s,/）)])", rt):
+            return 100
+
+    # 2) 中文房型名稱完全包含
+    if opt_name and opt_name in rt:
+        return 95
+    if opt_name and rt in opt_name:
+        # 若輸入僅為過泛詞（如只有「大床」），視為不夠明確，降低分數
+        if rt in ("大床", "雙床", "客房", "套房", "房", "大", "雙"):
+            return 50
+        return 90
+
+    # 2.5) 簡繁/異體字拼音匹配（如 维多利亚套房 vs 維多利亞套房）
+    if opt_name and _pinyin(rt) == _pinyin(opt_name):
+        return 88
+
+    # 3) 關鍵字匹配（按共同詞數與長度加權）
+    # 先清理出一些有意義的關鍵字（去掉「房」「套房」等過泛詞）
+    def tokens(s):
+        s = re.sub(r"[\(\)（）,，、/\\\s]+", " ", s)
+        return [t for t in s.split() if len(t) >= 2]
+
+    opt_tokens = tokens(opt_name)
+    rt_tokens = tokens(rt)
+    if not opt_tokens or not rt_tokens:
+        return 0
+    score = 0
+    for t in opt_tokens:
+        # 套房/客房/房等泛詞權重較低
+        weight = 15 if t in ("套房", "客房", "房") else 30
+        if t in rt_tokens:
+            score += weight
+        # 部分匹配（如「維多利亞」命中「维多利亚」）
+        elif any(t in r or r in t for r in rt_tokens):
+            score += weight // 2
+    return min(score, 89)  # 低於直接匹配門檻
+
+
+def _fill_room_type(ws, room_type):
+    """在 RM TYPE 區域自動勾選最匹配的房型選項。
+
+    匹配規則：
+      · 代碼完全匹配（如 TC）→ 直接勾選
+      · 中文房型名完全包含 → 直接勾選
+      · 關鍵字匹配時，必須是唯一的最高分（避免「大床」同時命中多個選項）
+    """
+    if not room_type:
+        return
+    cells = _find_room_type_cells(ws)
+    if not cells:
+        return
+    scores = [(c, _match_room_type(room_type, c.value)) for c in cells]
+    scores.sort(key=lambda x: x[1], reverse=True)
+    best_cell, best_score = scores[0]
+    second_score = scores[1][1] if len(scores) > 1 else 0
+
+    # 唯一高分才勾選：
+    #   - 直接匹配（代碼/名稱）>= 90 分可接受同分（通常不會重複）
+    #   - 關鍵字匹配（<90 分）必須明顯領先第二名
+    should_check = False
+    if best_score >= 90:
+        should_check = True
+    elif best_score >= 60 and best_score > second_score + 10:
+        should_check = True
+
+    if should_check:
+        val = best_cell.value
+        # 僅替換開頭的勾選框為 (✓)，保留房型名與代碼
+        new_val = re.sub(r"^\([\s]*\)", "(✓)", val, count=1)
+        best_cell.value = new_val
+
+
 def _fill_special_request(ws, lc, value, orig_label):
     """特別要求：『特別要求 Special request：吸菸』顯示在「原本標籤合併格」內。
 
@@ -281,7 +423,7 @@ def _fill_special_request(ws, lc, value, orig_label):
     )
 
 
-def _fill_form_sheet(ws, b: dict, orig_special_label=None):
+def _fill_form_sheet(ws, b: dict, orig_special_label=None, orig_room_cells=None):
     """label-driven 填一張訂房單主表格（只填有值的欄，避免清掉模板）。"""
     # 吸菸 -> 特別要求欄；True=吸菸，False=禁煙，None=不填
     special = ""
@@ -320,6 +462,10 @@ def _fill_form_sheet(ws, b: dict, orig_special_label=None):
         cell.value = v
         if isinstance(v, (datetime, date)):
             cell.number_format = _CHECK_FMT if field in ("checkin", "checkout") else _DOB_FMT
+
+    # 房型自動勾選（若輸入可明確對應模板選項）
+    if b.get("room_type"):
+        _fill_room_type(ws, b["room_type"])
 
 
 def _safe_sheet_title(base: str, idx: int, surname: str) -> str:
@@ -446,13 +592,18 @@ def _render(cfg: dict, bookings: list) -> str:
     slc = _find_label(src_form, HT.FORM_LABELS.get("special_request", []))
     if slc is not None:
         _orig_special = slc.value
+    # 同樣記錄原始房型選項文字，複製新表時可正確清空勾選
+    _orig_room_cells = {
+        (c.row, c.column): c.value
+        for c in _find_room_type_cells(src_form)
+    }
     if bookings:
-        _fill_form_sheet(src_form, bookings[0], _orig_special)
+        _fill_form_sheet(src_form, bookings[0], _orig_special, _orig_room_cells)
         src_form.title = _safe_sheet_title(form_name, 1, bookings[0].get("surname", ""))
         for idx, b in enumerate(bookings[1:], start=2):
             new_ws = wb.copy_worksheet(src_form)
-            _clear_form_values(new_ws)
-            _fill_form_sheet(new_ws, b, _orig_special)
+            _clear_form_values(new_ws, _orig_room_cells)
+            _fill_form_sheet(new_ws, b, _orig_special, _orig_room_cells)
             new_ws.title = _safe_sheet_title(form_name, idx, b.get("surname", ""))
 
     ts = taipei_now().strftime("%Y%m%d_%H%M%S")
@@ -484,12 +635,16 @@ def fill_manual(hotel_key: str, booking: dict) -> str:
     return _render(cfg, bookings)
 
 
-def _clear_form_values(ws):
+def _clear_form_values(ws, orig_room_cells=None):
     """清掉複製表中已填的所有主表格欄位值。"""
     for subs in HT.FORM_LABELS.values():
         lc = _find_label(ws, subs)
         if lc is not None:
             _input_cell(ws, lc).value = None
+    # 還原房型勾選框為原始未勾選文字
+    if orig_room_cells:
+        for (row, col), orig_val in orig_room_cells.items():
+            ws.cell(row=row, column=col).value = orig_val
 
 
 if __name__ == "__main__":
