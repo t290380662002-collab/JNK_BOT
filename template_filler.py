@@ -463,9 +463,9 @@ def _fill_form_sheet(ws, b: dict, orig_special_label=None, orig_room_cells=None)
         if isinstance(v, (datetime, date)):
             cell.number_format = _CHECK_FMT if field in ("checkin", "checkout") else _DOB_FMT
 
-    # 房型自動勾選（若輸入可明確對應模板選項）
-    if b.get("room_type"):
-        _fill_room_type(ws, b["room_type"])
+    # 房型欄不自動勾選（依用戶指示，房型留空由人工選擇）
+    # if b.get("room_type"):
+    #     _fill_room_type(ws, b["room_type"])
 
 
 def _safe_sheet_title(base: str, idx: int, surname: str) -> str:
