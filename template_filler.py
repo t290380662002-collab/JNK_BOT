@@ -352,38 +352,18 @@ def _match_room_type(room_type_input: str, option_text: str) -> int:
     return min(score, 89)  # 低於直接匹配門檻
 
 
+def _reset_room_type_cells(ws, orig_room_cells):
+    """強制把 RM TYPE 區域的勾選框還原為原始未勾選文字。"""
+    if not orig_room_cells:
+        return
+    for (row, col), orig_val in orig_room_cells.items():
+        ws.cell(row=row, column=col).value = orig_val
+
+
 def _fill_room_type(ws, room_type):
-    """在 RM TYPE 區域自動勾選最匹配的房型選項。
-
-    匹配規則：
-      · 代碼完全匹配（如 TC）→ 直接勾選
-      · 中文房型名完全包含 → 直接勾選
-      · 關鍵字匹配時，必須是唯一的最高分（避免「大床」同時命中多個選項）
-    """
-    if not room_type:
-        return
-    cells = _find_room_type_cells(ws)
-    if not cells:
-        return
-    scores = [(c, _match_room_type(room_type, c.value)) for c in cells]
-    scores.sort(key=lambda x: x[1], reverse=True)
-    best_cell, best_score = scores[0]
-    second_score = scores[1][1] if len(scores) > 1 else 0
-
-    # 唯一高分才勾選：
-    #   - 直接匹配（代碼/名稱）>= 90 分可接受同分（通常不會重複）
-    #   - 關鍵字匹配（<90 分）必須明顯領先第二名
-    should_check = False
-    if best_score >= 90:
-        should_check = True
-    elif best_score >= 60 and best_score > second_score + 10:
-        should_check = True
-
-    if should_check:
-        val = best_cell.value
-        # 僅替換開頭的勾選框為 (✓)，保留房型名與代碼
-        new_val = re.sub(r"^\([\s]*\)", "(✓)", val, count=1)
-        best_cell.value = new_val
+    """房型自動勾選（已停用）：依用戶要求，RM TYPE 留空由人工選擇。"""
+    # 保留函式簽名向後相容，但直接返回不做任何勾選
+    return
 
 
 def _fill_special_request(ws, lc, value, orig_label):
@@ -425,6 +405,8 @@ def _fill_special_request(ws, lc, value, orig_label):
 
 def _fill_form_sheet(ws, b: dict, orig_special_label=None, orig_room_cells=None):
     """label-driven 填一張訂房單主表格（只填有值的欄，避免清掉模板）。"""
+    # 房型欄強制重置為原始未勾選狀態（雙保險，避免舊模板/舊資料殘留）
+    _reset_room_type_cells(ws, orig_room_cells)
     # 吸菸 -> 特別要求欄；True=吸菸，False=禁煙，None=不填
     special = ""
     if b.get("smoking") is True:
